@@ -30,43 +30,12 @@ arx -w default -p demo domain add web web.your-domain
 arx -w default -p demo deploy web
 ```
 
-For Git Source services arx auto-detects the build stack (Gradle/Maven JVM, Node, Python, Go) and renders an in-memory Dockerfile. If your repo has a `Dockerfile` at its root, arx uses it as-is. Override the inferred commands per service:
+arx auto-detects the build stack (Gradle/Maven JVM, Node, Python, Go). If your repo has a `Dockerfile` at its root, arx uses it as-is. Override per service:
 
 ```bash
 arx -w default -p demo service config set web \
     --build-cmd "..." --start-cmd "..."
 ```
-
-## What it does
-
-- **Service types:** Git Source (auto-detected stack or `Dockerfile`), Docker Image, DB Template (postgres/mysql/mongodb/redis).
-- **Routing:** Traefik in the same Docker network. ACME via HTTP-01.
-- **Zero-downtime deploy:** TCP-or-HTTP healthcheck → Traefik route swap → old container removed.
-- **Cross-service references:** `${{Postgres.DATABASE_URL}}` resolved at container start, scoped to `(workspace × project × environment)`.
-- **Sealed variables:** write-only; injected into containers but never displayed.
-- **DB backups:** scheduled local backups with retention; manual restore.
-- **Audit log:** 90-day retention for sensitive actions.
-
-## Architecture
-
-`docker compose` brings up two containers — `arx` (Rust daemon, JSON HTTP API on `127.0.0.1:7878`) and `traefik` (ports 80/443) — sharing one Docker network and one named volume. arx creates user service containers on the same network. Traefik routes by `Host` header to a stable per-service alias (12-char sha256 of `service_id || env_id`). arx is itself routed by Traefik at `arx.<root-domain>` so GitHub webhooks can reach it.
-
-For Git Source builds, arx detects the stack from manifests in the repo, renders a Dockerfile in memory, and pipes it into `docker build -f -`. No template file is written into the user's repo.
-
-## Security model
-
-**arx has access to `/var/run/docker.sock`.** It can create privileged containers, mount any host path, and read any host file. Effectively, **arx admin = host root**.
-
-- arx binds only to `127.0.0.1:7878`. Public access happens via Traefik with TLS + GitHub OAuth.
-- Variable values are encrypted at rest with ChaCha20-Poly1305. The master key lives only inside the `arx-data` Docker volume.
-- Sealed variables are write-only and never displayed.
-- Audit log records sensitive actions for 90 days.
-
-Out of scope for v1: socket proxies, rootless Docker, user-namespace remapping, container-runtime isolation.
-
-**Network requirement:** `arx setup` verifies domains against `8.8.8.8` directly. Split-horizon DNS environments where `8.8.8.8` is unreachable are unsupported in v1.
-
-**Do not run arx on a host where untrusted users can authenticate.**
 
 ## CLI
 
@@ -79,4 +48,4 @@ arx <noun> --help
 
 ## License
 
-Dual-licensed under [MIT](./LICENSE-MIT) or [Apache-2.0](./LICENSE-APACHE), at your option.
+Licensed under either [MIT](./LICENSE-MIT) or [Apache-2.0](./LICENSE-APACHE) — pick whichever fits your project.
