@@ -1,100 +1,118 @@
 # Installing arx
 
-This document covers every supported install path. For the 30-second version see the [README](./README.md).
+This document is written for a coding agent (Claude Code, Codex, Cursor, Copilot, etc.) to follow on the user's behalf.
 
-## Requirements
+If you are a human, you can run the install yourself in two lines (see README), or paste the following into your agent:
 
-- Linux or macOS host with Docker Engine running (`docker --version`).
-- Outbound network to GitHub, ghcr.io, and `8.8.8.8` (UDP/53). arx's domain verification queries Google DNS directly; see the README's network-requirement note.
-- For the server box: a hostname pointing at the box's public IP (an A record) if you want public HTTPS via ACME. Local-only / homelab installs without a real domain still work for everything except certificate issuance.
+> Read https://raw.githubusercontent.com/arxdevs/arx/main/install.md and install arx for me. Ask me whatever you need.
 
-## Server box — full install
+The agent should then follow the protocol below.
+
+---
+
+## Agent protocol
+
+### Step 1 — Role check
+
+Ask the user, in their language:
+
+> Are we installing on the **server box** (the machine that will run the arx daemon and host deployments), the **client** (your laptop that issues commands to a remote arx), or both on the same machine?
+
+Do not proceed until the user answers. Record the role. Continue with the matching section(s) below.
+
+### Step 2 — Server install
+
+Only run this section when the role is `server` or `both`.
+
+1. Confirm with the user before proceeding. State plainly:
+   > Installing arx grants the daemon root-equivalent access via `/var/run/docker.sock`. It will create a docker compose stack (`arx` + `traefik`) and bind ports 80, 443, and `127.0.0.1:7878`. Continue?
+
+2. Check prerequisites with the user (run the commands, report results, ask if any check fails):
+   - `docker --version` — Docker must be installed and reachable.
+   - `docker info` succeeds — Docker daemon is running.
+   - The user must own a hostname whose A record points at this box (for public HTTPS via ACME). Local-only installs without a domain still work for everything except certificate issuance — ask the user whether they have a public domain to attach now or will attach one later.
+
+3. Run the installer:
+   ```bash
+   curl -sSL https://raw.githubusercontent.com/arxdevs/arx/main/install.sh | sh
+   ```
+   If `~/.local/bin` is not on the user's `PATH`, the script prints a hint — surface that hint to the user verbatim.
+
+4. Ask the user for the **root domain** before running setup. Example: `me.com`. arx's admin domain defaults to `arx.<root-domain>` (e.g. `arx.me.com`). Skip if the user said they will attach a domain later.
+
+5. Ask the user for the **ACME email** (used by Let's Encrypt). Skip if no domain is set.
+
+6. Run `arx setup`. This is an interactive flow:
+   - It opens a browser to create a GitHub App. If the box is headless or the user is over SSH, tell the user to either re-run inside an SSH tunnel —
+     ```bash
+     ssh -L 7919:127.0.0.1:7919 user@server arx setup
+     ```
+     — or use `arx setup --no-browser` and paste the redirect URL's `code` query parameter when prompted.
+   - Surface every prompt to the user verbatim. Do not paraphrase or skip.
+
+7. Verify the daemon is up:
+   ```bash
+   curl -s http://127.0.0.1:7878/health
+   ```
+   Expected output: `ok`. Report this to the user.
+
+### Step 3 — Client install
+
+Only run this section when the role is `client` or `both`.
+
+1. If this is the same machine where the server was just installed, skip the binary install — the CLI is already in place.
+
+2. Otherwise run:
+   ```bash
+   curl -sSL https://raw.githubusercontent.com/arxdevs/arx/main/install.sh | sh
+   ```
+
+3. Ask the user for the **server URL**. Example: `https://arx.me.com`. If they just installed the server, suggest the same `arx.<root-domain>` value.
+
+4. Run:
+   ```bash
+   arx login --server <server-url>
+   ```
+   If the user is on a headless machine, run with `--device` instead and surface the printed code + URL to the user verbatim.
+
+5. Verify:
+   ```bash
+   arx whoami
+   ```
+   Expected output: a JSON object with the user's `github_login`. Report to the user.
+
+### Step 4 — Done
+
+State to the user:
+
+> arx is installed. To deploy your first service, run `arx -w default project create --slug demo --name Demo`, then `arx --help` for the rest.
+
+---
+
+## Variables the agent may consult
+
+- `ARX_BIN_DIR` — install destination (default `$HOME/.local/bin`). Ask the user if they want a different path, otherwise leave default.
+- `ARX_VERSION` — pin a specific release tag (default: latest). Only override if the user explicitly requests a version.
+
+## Things the agent must not do
+
+- Do not edit the user's shell config files (`~/.bashrc`, `~/.zshrc`, etc.) without explicit consent. If `~/.local/bin` is not on `PATH`, ask the user how they want to fix it.
+- Do not install via `sudo` unless the user explicitly chose a system-wide path like `/usr/local/bin`.
+- Do not run `arx server uninstall`, `docker volume rm`, or any cleanup command unless the user explicitly asked for uninstallation.
+- Do not skip prompts inside `arx setup`. They configure the GitHub App, admin domain, and ACME email — the agent must not guess values.
+
+## Uninstall
+
+Only run when the user explicitly asks:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/arxdevs/arx/main/install.sh | sh
-arx setup
+arx server uninstall      # stops + removes arx and traefik containers
+rm "$(command -v arx)"    # removes the CLI binary
+rm -rf ~/.arx             # removes client credentials and compose stack file
 ```
 
-What happens:
-
-1. `install.sh` places the `arx` CLI binary at `~/.local/bin/arx`. The script downloads the matching tarball for your OS/arch from the latest GitHub Release, verifies the executable, and exits.
-2. `arx setup` ensures the daemon stack is running (`docker compose up -d` for the `arx` + `traefik` services). It then walks you through:
-   - Creating a GitHub App via the manifest flow (browser-driven; see "Headless install" below for the SSH workflow).
-   - Recording your admin domain (`arx.<root-domain>`) and ACME email.
-   - Creating the first user from the GitHub account that authorised the App.
-   - Creating the default workspace.
-
-When `arx setup` returns, the daemon is healthy at `127.0.0.1:7878` and reachable publicly at `https://arx.<root-domain>` (once DNS and certs land).
-
-### Picking the install location
-
-`install.sh` honors `ARX_BIN_DIR` (default `$HOME/.local/bin`) and `ARX_VERSION` (default: the latest GitHub Release tag).
+The `arx-data` Docker volume (SQLite DB, encryption key, Traefik state) is preserved. Confirm with the user before removing it:
 
 ```bash
-ARX_BIN_DIR=/usr/local/bin curl -sSL https://raw.githubusercontent.com/arxdevs/arx/main/install.sh | sudo sh
-ARX_VERSION=v0.1.0 curl -sSL https://raw.githubusercontent.com/arxdevs/arx/main/install.sh | sh
+docker volume rm arx_arx-data
 ```
-
-### Headless install (SSH-only servers)
-
-If the server has no browser, run `arx setup` with the bundled loopback flag and forward port 7919 from your laptop:
-
-```bash
-ssh -L 7919:127.0.0.1:7919 user@server "arx setup"
-```
-
-Open the printed `http://127.0.0.1:7919/` URL on your laptop. After GitHub redirects back to that loopback address, the manifest exchange completes over the tunnel and `arx setup` continues on the server.
-
-If port forwarding is not available, run `arx setup --no-browser`. The CLI prints a URL — open it manually on any browser, copy the `code` parameter from the redirect URL bar, and paste it back into the terminal prompt.
-
-## Client laptop
-
-```bash
-curl -sSL https://raw.githubusercontent.com/arxdevs/arx/main/install.sh | sh
-arx login --server https://arx.<root-domain>
-```
-
-`arx login` opens a browser, completes GitHub OAuth (same App as the server), and stores a Bearer token in `~/.arx/credentials.json`. Subsequent CLI commands transparently use this credential against the configured server.
-
-For headless laptops add `--device`:
-
-```bash
-arx login --server https://arx.<root-domain> --device
-```
-
-You receive a short code; visit the printed URL in any browser, enter the code, and the CLI completes login when the auth lands.
-
-## Updating
-
-The CLI:
-
-```bash
-curl -sSL https://raw.githubusercontent.com/arxdevs/arx/main/install.sh | sh
-```
-
-Re-running `install.sh` overwrites the binary in place with the latest release.
-
-The daemon:
-
-```bash
-arx server upgrade
-```
-
-This pulls `ghcr.io/arxdevs/arx:latest`, recreates the `arx` and `traefik` containers, and runs any pending SQL migrations. Active user service containers are not touched.
-
-## Uninstalling
-
-```bash
-arx server uninstall   # tears down the compose stack
-rm "$(command -v arx)"
-rm -rf ~/.arx
-```
-
-`arx server uninstall` stops the `arx` + `traefik` containers and removes them. It does **not** delete the `arx-data` Docker volume (your SQLite database, encrypted variables, and Traefik state) — remove it explicitly with `docker volume rm arx_arx-data` if you really want a clean slate.
-
-## What the install scripts touch
-
-- `install.sh`: writes one file to `${ARX_BIN_DIR:-$HOME/.local/bin}/arx`. No services, no PATH edits, no shell-rc modifications.
-- `arx setup`: writes `compose.yml` to `~/.arx/`, brings up the docker compose stack, and stores the session token in `~/.arx/credentials.json`.
-
-Everything else lives inside the `arx-data` Docker volume (database, encryption key, Traefik dynamic config) — there is no on-host state to back up beyond that volume.

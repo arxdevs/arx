@@ -4,16 +4,24 @@
 
 > Status: early. v1 is taking shape. Use at your own risk.
 
-## Quick start
+## Install
 
-On the box that will run the daemon:
+Two paths — pick whichever fits.
+
+**Run it yourself.** On the box that will run the daemon:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/arxdevs/arx/main/install.sh | sh
 arx setup
 ```
 
-`arx setup` walks you through creating a GitHub App, configuring your admin domain, and bringing up the daemon stack (`arx` + `traefik`). For client laptops, SSH tunnels, and custom install paths see [install.md](./install.md).
+`arx setup` walks you through creating a GitHub App, your admin domain, and the daemon stack. For client laptops add `arx login --server https://arx.<root-domain>`.
+
+**Have an AI agent do it.** Paste this into Claude Code, Codex, Cursor, or another coding agent:
+
+> Read https://raw.githubusercontent.com/arxdevs/arx/main/install.md and install arx for me. Ask me whatever you need.
+
+The agent then follows [install.md](./install.md), asks you whether to install the server, the client, or both, prompts you for the root domain / ACME email at the right moments, and verifies the daemon at the end.
 
 ## Deploy a repo
 
