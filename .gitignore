@@ -1,0 +1,22 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Local config / data
+/arx.db
+/arx.db-*
+/data
+*.key
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Web build artifacts
+/web/node_modules
+/web/dist
+/web/.cache
