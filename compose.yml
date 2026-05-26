@@ -1,0 +1,58 @@
+name: arx
+
+services:
+  arx:
+    image: ghcr.io/jbj338033/arx:latest
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - arx-data:/var/lib/arx
+    ports:
+      - "127.0.0.1:7878:7878"
+    networks:
+      arx:
+        aliases: [arx]
+    environment:
+      ARX_CONFIG: /etc/arx/config.toml
+      RUST_LOG: info,arx=debug,sqlx=warn,tower_http=info
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:7878/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  traefik:
+    image: traefik:v3.2
+    restart: unless-stopped
+    command:
+      - --providers.file.filename=/var/lib/arx/traefik/dynamic.yml
+      - --providers.file.watch=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.le.acme.httpchallenge=true
+      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      - --api.dashboard=true
+      - --api.insecure=true
+      - --log.level=INFO
+      - --accesslog=true
+    ports:
+      - "80:80"
+      - "443:443"
+      # admin API stays internal — arx reaches `http://traefik:8080` over
+      # the shared docker network; no host port needed.
+    volumes:
+      - arx-data:/var/lib/arx:ro
+      - traefik-certs:/letsencrypt
+    depends_on:
+      arx:
+        condition: service_healthy
+    networks: [arx]
+
+networks:
+  arx:
+    name: arx
+
+volumes:
+  arx-data:
+  traefik-certs:

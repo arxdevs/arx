@@ -1,0 +1,6 @@
+# Local dev override: use the locally-built `arx:local` image instead of
+# pulling from ghcr.io. docker-compose automatically merges this on top of
+# compose.yml when both files exist.
+services:
+  arx:
+    image: arx:local
