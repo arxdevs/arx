@@ -2,7 +2,7 @@ name: arx
 
 services:
   arx:
-    image: ghcr.io/jbj338033/arx:latest
+    image: ghcr.io/arxdevs/arx:latest
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

@@ -4,7 +4,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
 
-const COMPOSE_URL: &str = "https://raw.githubusercontent.com/jbj338033/arx/main/compose.yml";
+const COMPOSE_URL: &str = "https://raw.githubusercontent.com/arxdevs/arx/main/compose.yml";
 
 pub fn compose_path() -> Result<PathBuf> {
     let home = std::env::var("HOME").context("HOME not set")?;

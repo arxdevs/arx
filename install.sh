@@ -2,7 +2,7 @@
 # arx CLI installer. POSIX shell.
 #
 # Usage:
-#   curl -sSL https://raw.githubusercontent.com/jbj338033/arx/main/install.sh | sh
+#   curl -sSL https://raw.githubusercontent.com/arxdevs/arx/main/install.sh | sh
 #
 # Installs the arx CLI binary to $BIN_DIR (default: $HOME/.local/bin).
 # After install, run:
@@ -11,7 +11,7 @@
 
 set -eu
 
-REPO="jbj338033/arx"
+REPO="arxdevs/arx"
 BIN_DIR="${ARX_BIN_DIR:-$HOME/.local/bin}"
 BIN_NAME="arx"
 

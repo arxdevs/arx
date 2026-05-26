@@ -11,7 +11,7 @@ Written in Rust. Single Docker network, single GitHub App for identity + webhook
 On the box that will run the daemon:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/jbj338033/arx/main/install.sh | sh
+curl -sSL https://raw.githubusercontent.com/arxdevs/arx/main/install.sh | sh
 arx setup
 ```
 
@@ -20,7 +20,7 @@ arx setup
 On a client laptop:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/jbj338033/arx/main/install.sh | sh
+curl -sSL https://raw.githubusercontent.com/arxdevs/arx/main/install.sh | sh
 arx login --server https://arx.your-domain
 ```
 

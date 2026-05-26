@@ -98,8 +98,8 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/jbj338033/arx:latest
-            ghcr.io/jbj338033/arx:${{ steps.vars.outputs.version }}
-            ghcr.io/jbj338033/arx:${{ github.ref_name }}
+            ghcr.io/arxdevs/arx:latest
+            ghcr.io/arxdevs/arx:${{ steps.vars.outputs.version }}
+            ghcr.io/arxdevs/arx:${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
