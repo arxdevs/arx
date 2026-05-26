@@ -20,3 +20,7 @@ Cargo.lock.bak
 /web/node_modules
 /web/dist
 /web/.cache
+
+# Local dev: do not commit this — auto-merged by `docker compose`
+compose.override.yml
+compose.override.*.yml
