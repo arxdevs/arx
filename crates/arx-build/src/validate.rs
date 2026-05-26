@@ -111,16 +111,19 @@ pub fn parse_node_major_from_engines(spec: &str) -> Option<u8> {
     if let Ok(n) = parse_node_major(spec) {
         return Some(n);
     }
-    let cleaned: String = spec
-        .chars()
-        .filter(|c| c.is_ascii_digit() || *c == '.' || *c == ' ')
-        .collect();
-    for tok in cleaned.split_whitespace() {
-        if let Ok(n) = parse_node_major(tok) {
-            return Some(n);
+    let mut runs: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for c in spec.chars() {
+        if c.is_ascii_digit() {
+            cur.push(c);
+        } else if !cur.is_empty() {
+            runs.push(std::mem::take(&mut cur));
         }
     }
-    None
+    if !cur.is_empty() {
+        runs.push(cur);
+    }
+    runs.iter().find_map(|r| parse_node_major(r).ok())
 }
 
 pub fn parse_python_minor(s: &str) -> Result<(u8, u8), BuildError> {
