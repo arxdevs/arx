@@ -1,0 +1,105 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-cli:
+    name: build cli (${{ matrix.asset }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            asset: arx-linux-amd64
+            use_zigbuild: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            asset: arx-linux-arm64
+            use_zigbuild: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+            asset: arx-darwin-amd64
+            use_zigbuild: false
+          - target: aarch64-apple-darwin
+            os: macos-14
+            asset: arx-darwin-arm64
+            use_zigbuild: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: install zig + cargo-zigbuild
+        if: matrix.use_zigbuild
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.13.0
+      - name: install cargo-zigbuild
+        if: matrix.use_zigbuild
+        run: cargo install --locked cargo-zigbuild
+
+      - name: build (zigbuild)
+        if: matrix.use_zigbuild
+        run: cargo zigbuild --release --locked --bin arx --target ${{ matrix.target }}
+      - name: build (native)
+        if: ${{ !matrix.use_zigbuild }}
+        run: cargo build --release --locked --bin arx --target ${{ matrix.target }}
+
+      - name: package
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/arx dist/arx
+          chmod +x dist/arx
+          tar -czf ${{ matrix.asset }}.tar.gz -C dist arx
+          shasum -a 256 ${{ matrix.asset }}.tar.gz > ${{ matrix.asset }}.tar.gz.sha256
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            ${{ matrix.asset }}.tar.gz
+            ${{ matrix.asset }}.tar.gz.sha256
+
+  build-server-image:
+    name: build server image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: extract version
+        id: vars
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/jbj338033/arx:latest
+            ghcr.io/jbj338033/arx:${{ steps.vars.outputs.version }}
+            ghcr.io/jbj338033/arx:${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
