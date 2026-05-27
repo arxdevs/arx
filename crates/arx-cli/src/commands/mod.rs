@@ -1,6 +1,6 @@
 use crate::cli::{
     BackupCmd, Cli, Command, ConfigCmd, DomainCmd, ProjectCmd, ServerCertCmd, ServerCmd,
-    ServerConfigCmd, ServiceCmd, VarCmd, WorkspaceCmd,
+    ServerConfigCmd, ServiceCmd, VarCmd, VolumeCmd, WorkspaceCmd,
 };
 use crate::client::{Client, print_value, push_delete_query};
 use crate::credentials::{CredentialEntry, remove_credential, save_credentials, upsert_credential};
@@ -105,6 +105,11 @@ pub(crate) async fn dispatch(
             client.request(reqwest::Method::DELETE, &path, None).await?;
             if !cli.quiet {
                 eprintln!("deleted workspace {slug}");
+                if !with_data {
+                    eprintln!(
+                        "  data volumes retained. run `arx volume prune` to clean up orphans, or re-run with --with-data."
+                    );
+                }
             }
         }
         Command::Workspace(WorkspaceCmd::Create { slug, name }) => {
@@ -141,6 +146,11 @@ pub(crate) async fn dispatch(
             client.request(reqwest::Method::DELETE, &path, None).await?;
             if !cli.quiet {
                 eprintln!("deleted project {slug}");
+                if !with_data {
+                    eprintln!(
+                        "  data volumes retained. run `arx volume prune` to clean up orphans, or re-run with --with-data."
+                    );
+                }
             }
         }
         Command::Project(ProjectCmd::Create { slug, name }) => {
@@ -193,6 +203,11 @@ pub(crate) async fn dispatch(
             client.request(reqwest::Method::DELETE, &path, None).await?;
             if !cli.quiet {
                 eprintln!("deleted service {slug}");
+                if !with_data {
+                    eprintln!(
+                        "  data volume retained. run `arx volume prune` to clean up orphans, or re-run with --with-data."
+                    );
+                }
             }
         }
         Command::Service(ServiceCmd::Show { slug }) => {
@@ -779,6 +794,30 @@ pub(crate) async fn dispatch(
                 .request(reqwest::Method::POST, "/v1/server/cert/retry", None)
                 .await?
                 .unwrap_or(Value::Null);
+            print_value(&v, cli.json);
+        }
+        Command::Volume(VolumeCmd::List) => {
+            let w = ws(cli.workspace.as_deref())?;
+            let v = client
+                .request(
+                    reqwest::Method::GET,
+                    &format!("/v1/workspaces/{w}/admin/volumes"),
+                    None,
+                )
+                .await?
+                .unwrap_or(Value::Null);
+            print_value(&v, cli.json);
+        }
+        Command::Volume(VolumeCmd::Prune { execute }) => {
+            let w = ws(cli.workspace.as_deref())?;
+            let path = format!("/v1/workspaces/{w}/admin/volumes/prune?execute={}", execute);
+            let v = client
+                .request(reqwest::Method::POST, &path, None)
+                .await?
+                .unwrap_or(Value::Null);
+            if !cli.quiet && !cli.json && !execute {
+                eprintln!("dry-run: pass --execute to actually remove");
+            }
             print_value(&v, cli.json);
         }
     }

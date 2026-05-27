@@ -11,7 +11,7 @@ use bollard::models::{
     PortBinding as DockerPortBinding, RestartPolicy as DockerRestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::network::CreateNetworkOptions;
-use bollard::volume::{CreateVolumeOptions, RemoveVolumeOptions};
+use bollard::volume::{CreateVolumeOptions, ListVolumesOptions, RemoveVolumeOptions};
 use futures::StreamExt;
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
@@ -377,6 +377,37 @@ impl ContainerEngine for DockerEngine {
             }) => Ok(()),
             Err(e) => Err(map_err(e)),
         }
+    }
+
+    async fn list_volumes(
+        &self,
+        labels: &HashMap<String, String>,
+    ) -> Result<Vec<VolumeInfo>, EngineError> {
+        let mut filters: HashMap<String, Vec<String>> = HashMap::new();
+        let label_filters: Vec<String> = labels.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        if !label_filters.is_empty() {
+            filters.insert("label".to_string(), label_filters);
+        }
+        let opts = ListVolumesOptions { filters };
+        let resp = self
+            .docker
+            .list_volumes(Some(opts))
+            .await
+            .map_err(map_err)?;
+        let mut out = Vec::new();
+        for v in resp.volumes.unwrap_or_default() {
+            let ref_count = v
+                .usage_data
+                .as_ref()
+                .map(|u| u.ref_count.max(0) as u32)
+                .unwrap_or(0);
+            out.push(VolumeInfo {
+                name: v.name,
+                labels: v.labels,
+                ref_count,
+            });
+        }
+        Ok(out)
     }
 }
 

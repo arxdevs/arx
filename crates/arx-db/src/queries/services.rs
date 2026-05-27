@@ -117,6 +117,18 @@ pub async fn get_by_slug(pool: &SqlitePool, project_id: ProjectId, slug: &str) -
     parse(&row.ok_or(Error::NotFound)?)
 }
 
+pub async fn all_ids(pool: &SqlitePool) -> Result<Vec<ServiceId>> {
+    let rows = sqlx::query("SELECT id FROM services")
+        .fetch_all(pool)
+        .await
+        .map_err(map_sqlx)?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(row.try_id::<ServiceId>("id")?);
+    }
+    Ok(out)
+}
+
 pub async fn list_in_project(pool: &SqlitePool, project_id: ProjectId) -> Result<Vec<Service>> {
     let q =
         format!("SELECT {SELECT_COLS} FROM services WHERE project_id = ? ORDER BY created_at ASC");

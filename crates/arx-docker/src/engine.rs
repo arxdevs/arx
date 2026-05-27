@@ -64,6 +64,13 @@ pub enum Mount {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeInfo {
+    pub name: String,
+    pub labels: HashMap<String, String>,
+    pub ref_count: u32,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ResourceLimits {
     pub cpu_cores: Option<f64>,
@@ -156,6 +163,11 @@ pub trait ContainerEngine: Send + Sync + 'static {
     ) -> Result<(), EngineError>;
 
     async fn remove_volume(&self, name: &str) -> Result<(), EngineError>;
+
+    async fn list_volumes(
+        &self,
+        labels: &HashMap<String, String>,
+    ) -> Result<Vec<VolumeInfo>, EngineError>;
 
     async fn status(&self, handle: &ContainerHandle) -> Result<ContainerStatus, EngineError>;
 

@@ -12,6 +12,7 @@ mod github_routes;
 mod setup;
 mod state;
 mod var_resolve;
+mod volumes;
 
 use anyhow::Context;
 use arx_core::config::Config;
