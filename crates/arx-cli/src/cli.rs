@@ -117,6 +117,22 @@ pub(crate) enum Command {
 
     #[command(subcommand)]
     Server(ServerCmd),
+
+    #[command(subcommand)]
+    Volume(VolumeCmd),
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum VolumeCmd {
+    /// List all arx-managed docker volumes with classification.
+    List,
+
+    /// Remove orphan volumes (volumes whose owning service no longer exists).
+    /// Default is dry-run; pass --execute to actually remove.
+    Prune {
+        #[arg(long)]
+        execute: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -211,6 +227,7 @@ pub(crate) enum WorkspaceCmd {
         slug: String,
         #[arg(long)]
         force: bool,
+        /// Also remove docker named volumes and backup files for every affected service.
         #[arg(long)]
         with_data: bool,
     },
@@ -229,6 +246,7 @@ pub(crate) enum ProjectCmd {
         slug: String,
         #[arg(long)]
         force: bool,
+        /// Also remove docker named volumes and backup files for every affected service.
         #[arg(long)]
         with_data: bool,
     },
@@ -277,6 +295,7 @@ pub(crate) enum ServiceCmd {
         slug: String,
         #[arg(long)]
         force: bool,
+        /// Also remove the docker named volume and backup files for this service.
         #[arg(long)]
         with_data: bool,
     },
