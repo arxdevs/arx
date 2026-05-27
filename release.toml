@@ -1,5 +1,5 @@
 publish = false
 shared-version = true
-tag-prefix = "v"
+tag-prefix = ""
 pre-release-commit-message = "release v{{version}}"
 tag-message = "Release {{version}}"
