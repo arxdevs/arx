@@ -3,9 +3,10 @@ use crate::error::ApiResult;
 use crate::state::AppState;
 use arx_core::model::{DbTemplate, Deployment, Environment, Project, Service, Workspace};
 use arx_db::queries::variables;
-use arx_docker::VolumeMount;
+use arx_docker::{ContainerEngine, Mount};
 use rand::Rng;
 use rand::distributions::Alphanumeric;
+use std::collections::HashMap;
 
 pub async fn deploy(
     app: &AppState,
@@ -44,17 +45,25 @@ pub async fn deploy(
 
     env.push(("PORT".into(), port.to_string()));
 
-    let host_path = app
-        .config
-        .paths
-        .volumes_dir
-        .join(service.id.as_uuid().to_string())
-        .to_string_lossy()
-        .to_string();
-    std::fs::create_dir_all(&host_path).ok();
+    let vol_name = volume_name(service, environment);
+    let labels = HashMap::from([
+        ("arx.managed".to_string(), "true".to_string()),
+        (
+            "arx.service-id".to_string(),
+            service.id.as_uuid().to_string(),
+        ),
+        (
+            "arx.environment-id".to_string(),
+            environment.id.as_uuid().to_string(),
+        ),
+    ]);
+    app.docker
+        .ensure_volume(&vol_name, &labels)
+        .await
+        .map_err(|e| crate::error::ApiError::internal(e.to_string()))?;
 
-    let mounts = vec![VolumeMount {
-        host_path,
+    let mounts = vec![Mount::NamedVolume {
+        name: vol_name,
         container_path: data_dir,
         read_only: false,
     }];
@@ -256,6 +265,10 @@ fn urlencode(s: &str) -> String {
 
 fn container_hostname(service: &Service, environment: &Environment) -> String {
     format!("arx-{}-{}", service.slug, environment.slug)
+}
+
+pub(crate) fn volume_name(service: &Service, environment: &Environment) -> String {
+    format!("arx-svc-{}-{}", service.id.as_uuid(), environment.slug)
 }
 
 fn random_lower(n: usize) -> String {

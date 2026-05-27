@@ -23,7 +23,7 @@ pub struct ContainerSpec {
 
     pub ports: Vec<PortBinding>,
 
-    pub mounts: Vec<VolumeMount>,
+    pub mounts: Vec<Mount>,
 
     pub resources: ResourceLimits,
 
@@ -50,10 +50,18 @@ pub enum Protocol {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VolumeMount {
-    pub host_path: String,
-    pub container_path: String,
-    pub read_only: bool,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Mount {
+    Bind {
+        host_path: String,
+        container_path: String,
+        read_only: bool,
+    },
+    NamedVolume {
+        name: String,
+        container_path: String,
+        read_only: bool,
+    },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -140,6 +148,14 @@ pub trait ContainerEngine: Send + Sync + 'static {
     async fn run(&self, spec: &ContainerSpec) -> Result<ContainerHandle, EngineError>;
 
     async fn stop_and_remove(&self, handle: &ContainerHandle) -> Result<(), EngineError>;
+
+    async fn ensure_volume(
+        &self,
+        name: &str,
+        labels: &HashMap<String, String>,
+    ) -> Result<(), EngineError>;
+
+    async fn remove_volume(&self, name: &str) -> Result<(), EngineError>;
 
     async fn status(&self, handle: &ContainerHandle) -> Result<ContainerStatus, EngineError>;
 

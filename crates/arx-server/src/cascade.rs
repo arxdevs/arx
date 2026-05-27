@@ -127,12 +127,15 @@ pub async fn delete_service(
     }
 
     if opts.with_data {
-        let vol_dir = app
-            .config
-            .paths
-            .volumes_dir
-            .join(service.id.as_uuid().to_string());
-        let _ = std::fs::remove_dir_all(&vol_dir);
+        let envs = arx_db::queries::environments::list_in_project(&app.db, service.project_id)
+            .await
+            .unwrap_or_default();
+        for env in envs {
+            let name = crate::db_template::volume_name(service, &env);
+            if let Err(e) = app.docker.remove_volume(&name).await {
+                warn!(error = %e, volume = %name, "failed to remove volume during cascade");
+            }
+        }
 
         let backup_dir = app
             .config

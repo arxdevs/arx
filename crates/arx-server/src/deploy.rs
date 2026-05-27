@@ -7,7 +7,7 @@ use arx_core::model::{
 };
 use arx_db::queries::{deployments, domains, service_env, services as svc_q};
 use arx_docker::{
-    ContainerEngine, ContainerSpec, PortBinding, Protocol, ResourceLimits, RestartPolicy,
+    ContainerEngine, ContainerSpec, Mount, PortBinding, Protocol, ResourceLimits, RestartPolicy,
 };
 use arx_traefik::{BackendTarget, Route};
 use std::collections::HashMap;
@@ -22,7 +22,7 @@ pub(crate) struct DeployContext<'a> {
     pub existing_dep_id: Option<arx_core::ids::DeploymentId>,
     pub image: String,
     pub extra_env: Vec<(String, String)>,
-    pub extra_mounts: Vec<arx_docker::VolumeMount>,
+    pub extra_mounts: Vec<Mount>,
 }
 
 pub async fn deploy(
