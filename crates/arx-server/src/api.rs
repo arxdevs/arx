@@ -101,6 +101,14 @@ pub fn router(state: AppState) -> Router {
             "/v1/workspaces/:ws/projects/:proj/services/:svc/backup-schedule",
             get(get_backup_schedule).put(put_backup_schedule),
         )
+        .route(
+            "/v1/workspaces/:ws/admin/volumes",
+            get(list_volumes_handler),
+        )
+        .route(
+            "/v1/workspaces/:ws/admin/volumes/prune",
+            post(prune_volumes_handler),
+        )
         .merge(crate::github_routes::routes())
         .merge(crate::setup::routes())
         .with_state(state)
@@ -1220,4 +1228,43 @@ async fn list_deployments(
             })
             .collect(),
     ))
+}
+
+#[derive(Deserialize, Default)]
+struct PruneQuery {
+    #[serde(default)]
+    execute: bool,
+}
+
+async fn list_volumes_handler(
+    Auth(user): Auth,
+    State(app): State<AppState>,
+    Path(ws): Path<String>,
+) -> ApiResult<Json<Vec<crate::volumes::VolumeReport>>> {
+    let _ = require_admin(&app, user.user_id, &ws).await?;
+    let reports = crate::volumes::list(&app).await?;
+    Ok(Json(reports))
+}
+
+async fn prune_volumes_handler(
+    Auth(user): Auth,
+    State(app): State<AppState>,
+    Path(ws): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<PruneQuery>,
+) -> ApiResult<Json<crate::volumes::PruneResult>> {
+    let _ = require_admin(&app, user.user_id, &ws).await?;
+    let result = crate::volumes::prune(&app, !q.execute).await?;
+    let _ = arx_db::queries::audit::write(
+        &app.db,
+        Some(user.user_id),
+        "volumes.prune",
+        &format!("workspace:{ws}"),
+        serde_json::json!({
+            "execute": q.execute,
+            "removed": result.removed.len(),
+            "skipped": result.skipped.len(),
+        }),
+    )
+    .await;
+    Ok(Json(result))
 }
