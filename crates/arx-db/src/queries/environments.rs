@@ -12,6 +12,7 @@ pub async fn create(
     slug: &str,
     name: &str,
 ) -> Result<Environment> {
+    arx_core::slug::validate("environment slug", slug)?;
     let id = EnvironmentId::new();
     let now = Utc::now();
     sqlx::query(

@@ -7,10 +7,11 @@ use bollard::container::{
 };
 use bollard::image::CreateImageOptions;
 use bollard::models::{
-    ContainerStateStatusEnum, EndpointSettings, HostConfig, Mount, MountTypeEnum,
+    ContainerStateStatusEnum, EndpointSettings, HostConfig, Mount as BollardMount, MountTypeEnum,
     PortBinding as DockerPortBinding, RestartPolicy as DockerRestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::network::CreateNetworkOptions;
+use bollard::volume::{CreateVolumeOptions, RemoveVolumeOptions};
 use futures::StreamExt;
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
@@ -110,12 +111,29 @@ impl ContainerEngine for DockerEngine {
         let mounts = spec
             .mounts
             .iter()
-            .map(|m| Mount {
-                target: Some(m.container_path.clone()),
-                source: Some(m.host_path.clone()),
-                typ: Some(MountTypeEnum::BIND),
-                read_only: Some(m.read_only),
-                ..Default::default()
+            .map(|m| match m {
+                Mount::Bind {
+                    host_path,
+                    container_path,
+                    read_only,
+                } => BollardMount {
+                    target: Some(container_path.clone()),
+                    source: Some(host_path.clone()),
+                    typ: Some(MountTypeEnum::BIND),
+                    read_only: Some(*read_only),
+                    ..Default::default()
+                },
+                Mount::NamedVolume {
+                    name,
+                    container_path,
+                    read_only,
+                } => BollardMount {
+                    target: Some(container_path.clone()),
+                    source: Some(name.clone()),
+                    typ: Some(MountTypeEnum::VOLUME),
+                    read_only: Some(*read_only),
+                    ..Default::default()
+                },
             })
             .collect::<Vec<_>>();
 
@@ -322,6 +340,43 @@ impl ContainerEngine for DockerEngine {
             })
             .boxed();
         Ok(mapped)
+    }
+
+    async fn ensure_volume(
+        &self,
+        name: &str,
+        labels: &HashMap<String, String>,
+    ) -> Result<(), EngineError> {
+        match self.docker.inspect_volume(name).await {
+            Ok(_) => return Ok(()),
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => {}
+            Err(e) => return Err(map_err(e)),
+        }
+        let opts = CreateVolumeOptions::<String> {
+            name: name.to_string(),
+            driver: "local".to_string(),
+            labels: labels.clone(),
+            ..Default::default()
+        };
+        self.docker.create_volume(opts).await.map_err(map_err)?;
+        info!(volume = %name, "volume created");
+        Ok(())
+    }
+
+    async fn remove_volume(&self, name: &str) -> Result<(), EngineError> {
+        let res = self
+            .docker
+            .remove_volume(name, Some(RemoveVolumeOptions { force: true }))
+            .await;
+        match res {
+            Ok(_) => Ok(()),
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(()),
+            Err(e) => Err(map_err(e)),
+        }
     }
 }
 

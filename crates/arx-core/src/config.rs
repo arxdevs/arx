@@ -38,7 +38,6 @@ pub struct PathsConfig {
     pub data_dir: PathBuf,
     pub db_path: PathBuf,
     pub repos_dir: PathBuf,
-    pub volumes_dir: PathBuf,
     pub backups_dir: PathBuf,
     pub traefik_dir: PathBuf,
 
@@ -51,7 +50,6 @@ impl Default for PathsConfig {
         Self {
             db_path: data.join("arx.db"),
             repos_dir: data.join("repos"),
-            volumes_dir: data.join("volumes"),
             backups_dir: data.join("backups"),
             traefik_dir: data.join("traefik"),
             master_key_path: data.join("master.key"),
