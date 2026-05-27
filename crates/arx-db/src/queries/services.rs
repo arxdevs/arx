@@ -31,6 +31,7 @@ pub async fn create(
     build_command: Option<&str>,
     start_command: Option<&str>,
 ) -> Result<Service> {
+    arx_core::slug::validate("service slug", slug)?;
     let id = ServiceId::new();
     let now = Utc::now();
     let kind = match source {

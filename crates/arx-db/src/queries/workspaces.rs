@@ -12,6 +12,7 @@ pub async fn create(
     name: &str,
     owner_user_id: UserId,
 ) -> Result<Workspace> {
+    arx_core::slug::validate("workspace slug", slug)?;
     let id = WorkspaceId::new();
     let now = Utc::now();
     let now_str = now.to_rfc3339();

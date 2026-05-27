@@ -12,6 +12,7 @@ pub async fn create(
     slug: &str,
     name: &str,
 ) -> Result<Project> {
+    arx_core::slug::validate("project slug", slug)?;
     let id = ProjectId::new();
     let now = Utc::now();
     let now_str = now.to_rfc3339();
