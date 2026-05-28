@@ -34,10 +34,8 @@ async fn tick(app: &AppState) -> Result<(), Box<dyn std::error::Error + Send + S
         "{}/api/http/routers",
         app.config.traefik.admin_api_url.trim_end_matches('/')
     );
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()?;
-    let routers: Vec<RouterInfo> = match http.get(&url).send().await {
+    let req = app.http.get(&url).timeout(Duration::from_secs(5)).send();
+    let routers: Vec<RouterInfo> = match req.await {
         Ok(r) if r.status().is_success() => r.json().await?,
         Ok(r) => {
             debug!(status = %r.status(), "traefik api non-success");

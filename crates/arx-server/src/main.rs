@@ -88,6 +88,11 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!(error = %e, "could not pre-write traefik dynamic config");
     }
 
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .context("building shared http client")?;
+
     let state = state::AppState {
         db: db.clone(),
         master_key: Arc::new(master_key),
@@ -95,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
         docker: Arc::new(docker),
         config: Arc::new(cfg.clone()),
         deploy_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        http,
     };
 
     cert_poll::spawn(state.clone());

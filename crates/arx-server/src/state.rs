@@ -18,6 +18,7 @@ pub struct AppState {
     pub docker: Arc<DockerEngine>,
     pub config: Arc<Config>,
     pub deploy_locks: DeployLockMap,
+    pub http: reqwest::Client,
 }
 
 impl AppState {

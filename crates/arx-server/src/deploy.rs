@@ -430,6 +430,7 @@ pub(crate) async fn deploy_docker_image(
     );
     let healthy = wait_healthy(
         &app.docker,
+        &app.http,
         &handle,
         port,
         env_cfg
@@ -490,6 +491,7 @@ pub(crate) async fn deploy_docker_image(
 
 async fn wait_healthy(
     engine: &arx_docker::DockerEngine,
+    http: &reqwest::Client,
     handle: &arx_docker::ContainerHandle,
     port: u16,
     path: Option<&str>,
@@ -522,13 +524,6 @@ async fn wait_healthy(
     };
     tracing::info!(container_ip = %container_ip, port, "probing TCP / HTTP");
 
-    let http_client = path.map(|_| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(3))
-            .build()
-            .expect("http client")
-    });
-
     while std::time::Instant::now() < deadline {
         if let Ok(arx_docker::ContainerStatus::Exited { code }) = engine.status(handle).await {
             if code != 0 {
@@ -538,7 +533,8 @@ async fn wait_healthy(
 
         if let Some(p) = path {
             let url = format!("http://{container_ip}:{port}{p}");
-            if let Ok(resp) = http_client.as_ref().unwrap().get(&url).send().await {
+            let req = http.get(&url).timeout(Duration::from_secs(3)).send().await;
+            if let Ok(resp) = req {
                 if resp.status().is_success() {
                     return true;
                 }
