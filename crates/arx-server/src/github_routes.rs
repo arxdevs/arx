@@ -264,11 +264,122 @@ async fn handle_push(app: AppState, payload: serde_json::Value, event_id: String
         return;
     }
 
+    let changed_paths = changed_paths_from_payload(&payload);
+
     for t in targets {
+        if !path_matches(
+            &changed_paths,
+            t.root_directory.as_deref(),
+            t.watch_paths.as_deref(),
+        ) {
+            tracing::info!(
+                repo,
+                branch,
+                service = %t.service_slug,
+                "push: service skipped (no path match)"
+            );
+            continue;
+        }
         crate::deploy_queue::enqueue(app.clone(), t);
     }
 
     mark_processed(&app, &event_id, None).await;
+}
+
+/// Returns `None` when the payload has no usable `commits` array — callers
+/// should treat that as "match everything" (safe fallback for tag pushes,
+/// branch creation, oversized push payloads, etc.).
+fn changed_paths_from_payload(payload: &serde_json::Value) -> Option<Vec<String>> {
+    let arr = payload.get("commits").and_then(|v| v.as_array())?;
+    if arr.is_empty() {
+        return None;
+    }
+    let mut out: Vec<String> = Vec::new();
+    for commit in arr {
+        for field in ["added", "modified", "removed"] {
+            if let Some(list) = commit.get(field).and_then(|v| v.as_array()) {
+                for p in list {
+                    if let Some(s) = p.as_str() {
+                        out.push(s.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+fn path_matches(
+    changed: &Option<Vec<String>>,
+    root_directory: Option<&str>,
+    watch_paths: Option<&[String]>,
+) -> bool {
+    // Safe fallback: no per-commit file list available → match everything.
+    let Some(changed) = changed else {
+        return true;
+    };
+
+    let mut builder = globset::GlobSetBuilder::new();
+    let mut added_any = false;
+
+    let push_pattern = |b: &mut globset::GlobSetBuilder, added: &mut bool, pat: &str| {
+        if let Ok(g) = globset::GlobBuilder::new(pat)
+            .literal_separator(false)
+            .build()
+        {
+            b.add(g);
+            *added = true;
+        }
+    };
+
+    match watch_paths {
+        Some(user_patterns) if !user_patterns.is_empty() => {
+            for p in user_patterns {
+                push_pattern(&mut builder, &mut added_any, p);
+            }
+        }
+        _ => {
+            if let Some(rd) = root_directory.and_then(|s| {
+                let trimmed = s.trim_matches('/');
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            }) {
+                push_pattern(&mut builder, &mut added_any, &format!("{rd}/**"));
+                for marker in [
+                    "**/pnpm-lock.yaml",
+                    "**/package-lock.json",
+                    "**/yarn.lock",
+                    "**/bun.lockb",
+                    "**/bun.lock",
+                    "**/turbo.json",
+                    "**/pnpm-workspace.yaml",
+                    "**/pnpm-workspace.yml",
+                    "package.json",
+                ] {
+                    push_pattern(&mut builder, &mut added_any, marker);
+                }
+            } else {
+                return true;
+            }
+        }
+    }
+
+    if !added_any {
+        return true;
+    }
+
+    let set = match builder.build() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "watch glob build failed; defaulting to match");
+            return true;
+        }
+    };
+
+    changed.iter().any(|p| set.is_match(p))
 }
 
 pub(crate) async fn run_deploy_target(
@@ -308,4 +419,70 @@ async fn mark_processed(app: &AppState, id: &str, error: Option<&str>) {
     .bind(id)
     .execute(&app.db)
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn changed_paths_extracts_added_modified_removed() {
+        let p = json!({
+            "commits": [
+                {"added": ["a.txt"], "modified": ["b.txt"], "removed": ["c.txt"]},
+                {"added": [], "modified": ["apps/web/x.ts"], "removed": null},
+            ]
+        });
+        let mut got = changed_paths_from_payload(&p).unwrap();
+        got.sort();
+        assert_eq!(got, vec!["a.txt", "apps/web/x.ts", "b.txt", "c.txt"]);
+    }
+
+    #[test]
+    fn changed_paths_returns_none_when_commits_missing() {
+        assert!(changed_paths_from_payload(&json!({})).is_none());
+        assert!(changed_paths_from_payload(&json!({"commits": []})).is_none());
+    }
+
+    #[test]
+    fn matches_root_directory_glob() {
+        let changed = Some(vec!["apps/web/src/index.ts".to_string()]);
+        assert!(path_matches(&changed, Some("apps/web"), None));
+        assert!(!path_matches(&changed, Some("apps/api"), None));
+    }
+
+    #[test]
+    fn matches_lockfile_default_in_monorepo() {
+        let changed = Some(vec!["pnpm-lock.yaml".to_string()]);
+        assert!(path_matches(&changed, Some("apps/web"), None));
+        assert!(path_matches(&changed, Some("apps/api"), None));
+    }
+
+    #[test]
+    fn user_patterns_take_priority_over_defaults() {
+        // Even though the lockfile would match default patterns, user-supplied
+        // watch_paths should narrow the match.
+        let changed = Some(vec!["pnpm-lock.yaml".to_string()]);
+        let user = vec!["apps/web/**".to_string()];
+        assert!(!path_matches(&changed, Some("apps/web"), Some(&user)));
+    }
+
+    #[test]
+    fn no_root_no_watch_matches_everything() {
+        let changed = Some(vec!["random/file.txt".to_string()]);
+        assert!(path_matches(&changed, None, None));
+    }
+
+    #[test]
+    fn no_commits_safe_fallback_matches() {
+        assert!(path_matches(&None, Some("apps/web"), None));
+    }
+
+    #[test]
+    fn empty_watch_paths_falls_back_to_default() {
+        let changed = Some(vec!["apps/web/x.ts".to_string()]);
+        let empty: Vec<String> = vec![];
+        assert!(path_matches(&changed, Some("apps/web"), Some(&empty)));
+    }
 }

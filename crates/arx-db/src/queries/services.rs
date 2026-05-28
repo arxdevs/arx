@@ -204,6 +204,20 @@ pub async fn find_git_targets(
 
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
+        let source_json: String = r.try_get("source").map_err(map_sqlx)?;
+        let parsed: serde_json::Value = serde_json::from_str(&source_json).unwrap_or_default();
+        let root_directory = parsed
+            .get("root_directory")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let watch_paths = parsed
+            .get("watch_paths")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<String>>()
+            });
         out.push(GitTarget {
             workspace_id: r.try_id::<WorkspaceId>("workspace_id")?,
             workspace_slug: r.try_get("workspace_slug").map_err(map_sqlx)?,
@@ -213,6 +227,8 @@ pub async fn find_git_targets(
             service_slug: r.try_get("service_slug").map_err(map_sqlx)?,
             environment_id: r.try_id::<EnvironmentId>("env_id")?,
             environment_slug: r.try_get("env_slug").map_err(map_sqlx)?,
+            root_directory,
+            watch_paths,
         });
     }
     Ok(out)
@@ -228,6 +244,8 @@ pub struct GitTarget {
     pub service_slug: String,
     pub environment_id: EnvironmentId,
     pub environment_slug: String,
+    pub root_directory: Option<String>,
+    pub watch_paths: Option<Vec<String>>,
 }
 
 pub async fn set_current_deployment(
