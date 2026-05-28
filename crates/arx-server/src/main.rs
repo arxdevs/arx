@@ -11,6 +11,7 @@ mod error;
 mod github_routes;
 mod setup;
 mod state;
+mod supervisor;
 mod var_resolve;
 mod volumes;
 

@@ -1,17 +1,21 @@
 use crate::state::AppState;
+use crate::supervisor::spawn_supervised;
 use arx_core::model::CertStatus;
 use serde::Deserialize;
 use std::time::Duration;
 use tracing::{debug, warn};
 
 pub fn spawn(app: AppState) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_secs(30));
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            ticker.tick().await;
-            if let Err(e) = tick(&app).await {
-                debug!(error = %e, "cert poll tick failed");
+    spawn_supervised("cert_poll", move || {
+        let app = app.clone();
+        async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(30));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                if let Err(e) = tick(&app).await {
+                    debug!(error = %e, "cert poll tick failed");
+                }
             }
         }
     });
