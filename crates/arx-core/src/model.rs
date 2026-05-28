@@ -125,6 +125,8 @@ pub enum ServiceSource {
 
         dockerfile: Option<String>,
         root_directory: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        watch_paths: Option<Vec<String>>,
     },
     DockerImage {
         image: String,

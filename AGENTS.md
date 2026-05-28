@@ -47,8 +47,9 @@ Build the daemon image locally with `docker build -t arx:local -f Dockerfile .`.
 - **Logging**: `tracing` macros. No `println!` in library or server code.
 - **Async**: tokio runtime, `async fn`. Spawning long-running tasks goes through `state::AppState` so they share lifetimes.
 - **DB queries**: live in `arx-db/src/queries/<noun>.rs`. Always parameterise (`sqlx::query(...).bind(...)`). Never `format!`-build SQL.
-- **First-class service settings**: build/start commands and similar knobs are columns on `services`, never env-var piggybacks. Adding a new knob = migration + model field + queries + api handler + cli flag.
+- **First-class service settings**: build/start commands and similar knobs are columns on `services`, never env-var piggybacks. Adding a new knob = migration + model field + queries + api handler + cli flag. Exception: `source` is a JSON column on `services`, so per-source fields (`root_directory`, `watch_paths`, etc.) land inside that JSON — no migration needed for those.
 - **Stack templates**: any new stack adds one file in `crates/arx-build/src/stacks/`, plus a registration line in `crates/arx-build/src/stack.rs::detect_stack`.
+- **Monorepo awareness**: workspace detection lives in `crates/arx-build/src/monorepo.rs`. The Node stack respects an injected `WorkspaceContext` and emits workspace-filter commands (`pnpm --filter`, `bun --filter`, `npm -w`, `yarn workspace`); other stacks ignore monorepo layout for now. When a service's repo has a `.dockerignore`, monorepo builds benefit from it — the build context is the monorepo root.
 - **Input validation**: every value that ends up inside a generated Dockerfile, a `docker` argv, or a `git` argv must pass through `crates/arx-build/src/validate.rs` first. Bypassing it is an injection bug.
 
 ## Commit conventions

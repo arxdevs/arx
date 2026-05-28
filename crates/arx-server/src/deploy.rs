@@ -99,6 +99,7 @@ async fn deploy_with_optional_id(
             branch,
             dockerfile,
             root_directory,
+            watch_paths: _,
         } => {
             deploy_git_source(
                 app,

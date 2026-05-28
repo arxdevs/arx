@@ -233,6 +233,7 @@ pub(crate) async fn dispatch(
             template,
             dockerfile,
             root_directory,
+            watch_paths,
             build_command,
             start_command,
         }) => {
@@ -242,12 +243,18 @@ pub(crate) async fn dispatch(
                 "git" => {
                     let repo = repo
                         .ok_or_else(|| CliError::Usage("--repo is required for kind=git".into()))?;
+                    let watch_paths_json = if watch_paths.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::Array(watch_paths.into_iter().map(Value::String).collect())
+                    };
                     json!({
                         "kind": "git_source",
                         "github_repo": repo,
                         "branch": branch,
                         "dockerfile": dockerfile,
                         "root_directory": root_directory,
+                        "watch_paths": watch_paths_json,
                     })
                 }
                 "image" => {
