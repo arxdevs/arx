@@ -20,9 +20,9 @@ pub async fn backup_now(app: &AppState, service: &Service) -> ApiResult<BackupRe
     std::fs::create_dir_all(&dir).map_err(|e| ApiError::internal(e.to_string()))?;
     let path = dir.join(format!("{timestamp}.dump"));
 
-    let user = decoded_var(app, service, "ARX_DB_USER").await;
-    let db = decoded_var(app, service, "ARX_DB_NAME").await;
-    let password = decoded_var(app, service, "ARX_DB_PASSWORD").await;
+    let user = decoded_var(app, service, "DATABASE_USER").await;
+    let db = decoded_var(app, service, "DATABASE_NAME").await;
+    let password = decoded_var(app, service, "DATABASE_PASSWORD").await;
 
     let outfile = std::fs::File::create(&path).map_err(|e| ApiError::internal(e.to_string()))?;
 
@@ -149,9 +149,9 @@ pub async fn restore(app: &AppState, service: &Service, backup_uri: &str) -> Api
         return Err(ApiError::not_found());
     }
 
-    let user = decoded_var(app, service, "ARX_DB_USER").await;
-    let db = decoded_var(app, service, "ARX_DB_NAME").await;
-    let password = decoded_var(app, service, "ARX_DB_PASSWORD").await;
+    let user = decoded_var(app, service, "DATABASE_USER").await;
+    let db = decoded_var(app, service, "DATABASE_NAME").await;
+    let password = decoded_var(app, service, "DATABASE_PASSWORD").await;
 
     let mut cmd = Command::new("docker");
     cmd.arg("exec").arg("-i").arg(&container);
