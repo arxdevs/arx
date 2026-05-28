@@ -26,10 +26,7 @@ impl AppState {
         service_id: ServiceId,
         environment_id: EnvironmentId,
     ) -> Arc<AsyncMutex<()>> {
-        let mut map = self
-            .deploy_locks
-            .lock()
-            .expect("deploy_locks mutex poisoned");
+        let mut map = self.deploy_locks.lock().unwrap_or_else(|e| e.into_inner());
         map.entry((service_id, environment_id))
             .or_insert_with(|| Arc::new(AsyncMutex::new(())))
             .clone()
