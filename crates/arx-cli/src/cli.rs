@@ -253,6 +253,7 @@ pub(crate) enum ProjectCmd {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ServiceCmd {
     List,
     Show {
@@ -281,9 +282,12 @@ pub(crate) enum ServiceCmd {
         /// Optional explicit Dockerfile path inside the repo (relative).
         #[arg(long)]
         dockerfile: Option<String>,
-        /// Optional subdirectory of the repo to use as build context.
+        /// Subdirectory of the repo to build. For monorepos, this is the package directory (e.g. `apps/web`).
         #[arg(long)]
         root_directory: Option<String>,
+        /// Gitignore-style glob restricting which pushed file paths trigger a redeploy. Pass multiple times.
+        #[arg(long = "watch-path")]
+        watch_paths: Vec<String>,
         /// Override the auto-detected build command (passed to the builder).
         #[arg(long = "build-cmd")]
         build_command: Option<String>,
