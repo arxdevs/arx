@@ -13,6 +13,10 @@ Cargo.lock.bak
 .idea/
 *.swp
 
+# Coding agent local state (claude code, omc)
+.claude/
+.omc/
+
 # OS
 .DS_Store
 
