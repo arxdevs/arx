@@ -100,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
         docker: Arc::new(docker),
         config: Arc::new(cfg.clone()),
         deploy_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        traefik_lock: Arc::new(tokio::sync::Mutex::new(())),
         http,
     };
 

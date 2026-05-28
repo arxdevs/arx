@@ -558,6 +558,7 @@ async fn wait_healthy(
 }
 
 pub async fn rewrite_traefik(app: &AppState) -> ApiResult<()> {
+    let _guard = app.traefik_lock.lock().await;
     let all_domains = domains::list_all_active(&app.db).await?;
     let mut routes: Vec<Route> = Vec::new();
     let mut router_ids: Vec<String> = Vec::new();
