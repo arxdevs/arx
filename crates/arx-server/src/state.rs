@@ -5,6 +5,7 @@ use arx_db::crypto::MasterKey;
 use arx_docker::DockerEngine;
 use arx_traefik::TraefikWriter;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -18,6 +19,10 @@ pub struct AppState {
     pub docker: Arc<DockerEngine>,
     pub config: Arc<Config>,
     pub deploy_locks: DeployLockMap,
+    pub traefik_lock: Arc<AsyncMutex<()>>,
+    pub deploy_queue: crate::deploy_queue::DeployQueue,
+    pub in_flight_deploys: Arc<AtomicUsize>,
+    pub http: reqwest::Client,
 }
 
 impl AppState {
@@ -26,10 +31,7 @@ impl AppState {
         service_id: ServiceId,
         environment_id: EnvironmentId,
     ) -> Arc<AsyncMutex<()>> {
-        let mut map = self
-            .deploy_locks
-            .lock()
-            .expect("deploy_locks mutex poisoned");
+        let mut map = self.deploy_locks.lock().unwrap_or_else(|e| e.into_inner());
         map.entry((service_id, environment_id))
             .or_insert_with(|| Arc::new(AsyncMutex::new(())))
             .clone()

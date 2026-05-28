@@ -261,13 +261,16 @@ async fn decoded_var(app: &AppState, service: &Service, key: &str) -> Option<Str
 
 pub fn spawn_scheduler(app: AppState) {
     use std::time::Duration;
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_secs(60));
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            ticker.tick().await;
-            if let Err(e) = scheduler_tick(&app).await {
-                warn!(error = %e, "backup scheduler tick failed");
+    crate::supervisor::spawn_supervised("backups", move || {
+        let app = app.clone();
+        async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(60));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                if let Err(e) = scheduler_tick(&app).await {
+                    warn!(error = %e, "backup scheduler tick failed");
+                }
             }
         }
     });

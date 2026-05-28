@@ -6,24 +6,31 @@ mod cascade;
 mod cert_poll;
 mod db_template;
 mod deploy;
+mod deploy_queue;
 mod dns_verify;
 mod error;
 mod github_routes;
 mod setup;
 mod state;
+mod supervisor;
 mod var_resolve;
 mod volumes;
 
 use anyhow::Context;
 use arx_core::config::Config;
 use arx_db::crypto::MasterKey;
-use arx_docker::DockerEngine;
+use arx_docker::{ContainerEngine, DockerEngine};
 use arx_traefik::TraefikWriter;
 use clap::Parser;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
+
+const SHUTDOWN_GRACE_SECS: u64 = 30;
 
 #[derive(Debug, Parser)]
 #[command(name = "arx-server", version, about = "arx daemon")]
@@ -35,6 +42,9 @@ struct Cli {
         default_value = "/etc/arx/config.toml"
     )]
     config: PathBuf,
+
+    #[arg(long, env = "ARX_LISTEN")]
+    listen: Option<SocketAddr>,
 }
 
 #[tokio::main]
@@ -42,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
     init_tracing();
 
     let cli = Cli::parse();
-    let cfg = if cli.config.exists() {
+    let mut cfg = if cli.config.exists() {
         Config::load(&cli.config).context("loading config")?
     } else {
         tracing::warn!(
@@ -55,6 +65,9 @@ async fn main() -> anyhow::Result<()> {
             traefik: Default::default(),
         }
     };
+    if let Some(addr) = cli.listen {
+        cfg.server.listen = addr;
+    }
 
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "arx-server starting");
 
@@ -80,6 +93,11 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!(error = %e, "could not pre-write traefik dynamic config");
     }
 
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .context("building shared http client")?;
+
     let state = state::AppState {
         db: db.clone(),
         master_key: Arc::new(master_key),
@@ -87,7 +105,13 @@ async fn main() -> anyhow::Result<()> {
         docker: Arc::new(docker),
         config: Arc::new(cfg.clone()),
         deploy_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        traefik_lock: Arc::new(tokio::sync::Mutex::new(())),
+        deploy_queue: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        in_flight_deploys: Arc::new(AtomicUsize::new(0)),
+        http,
     };
+
+    cleanup_interrupted_deployments(&state).await;
 
     cert_poll::spawn(state.clone());
     backups::spawn_scheduler(state.clone());
@@ -104,8 +128,51 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
+    await_in_flight_deploys(&state.in_flight_deploys, SHUTDOWN_GRACE_SECS).await;
+    cleanup_interrupted_deployments(&state).await;
+
     drop(db);
     Ok(())
+}
+
+async fn cleanup_interrupted_deployments(state: &state::AppState) {
+    match arx_db::queries::deployments::mark_interrupted_as_failed(&state.db).await {
+        Ok(items) if !items.is_empty() => {
+            tracing::warn!(
+                count = items.len(),
+                "marked interrupted deployments as failed; cleaning up containers"
+            );
+            for (_, container_id) in items {
+                if let Some(id) = container_id {
+                    let handle = arx_docker::ContainerHandle(id);
+                    if let Err(e) = state.docker.stop_and_remove(&handle).await {
+                        tracing::debug!(error = %e, "container cleanup failed (may already be gone)");
+                    }
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(e) => tracing::error!(error = %e, "failed to mark interrupted deployments"),
+    }
+}
+
+async fn await_in_flight_deploys(counter: &Arc<AtomicUsize>, grace_secs: u64) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(grace_secs);
+    loop {
+        let n = counter.load(Ordering::SeqCst);
+        if n == 0 {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!(
+                in_flight = n,
+                "shutdown grace expired with deploys still running"
+            );
+            return;
+        }
+        tracing::info!(in_flight = n, "awaiting in-flight deploys");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 fn init_tracing() {

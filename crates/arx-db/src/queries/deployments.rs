@@ -35,6 +35,39 @@ pub async fn create_pending(
     Ok(id)
 }
 
+pub async fn mark_interrupted_as_failed(
+    pool: &SqlitePool,
+) -> Result<Vec<(String, Option<String>)>> {
+    let rows = sqlx::query(
+        "SELECT id, container_id FROM deployments
+         WHERE status IN ('pending', 'building', 'deploying')",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(map_sqlx)?;
+    let now = Utc::now().to_rfc3339();
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let id: String = row.try_get("id").map_err(map_sqlx)?;
+        let container_id: Option<String> = row.try_get("container_id").ok().flatten();
+        out.push((id, container_id));
+    }
+    if !rows.is_empty() {
+        sqlx::query(
+            "UPDATE deployments
+             SET status = 'failed',
+                 error = COALESCE(error, 'interrupted by daemon restart'),
+                 finished_at = ?
+             WHERE status IN ('pending', 'building', 'deploying')",
+        )
+        .bind(&now)
+        .execute(pool)
+        .await
+        .map_err(map_sqlx)?;
+    }
+    Ok(out)
+}
+
 pub async fn update_status(
     pool: &SqlitePool,
     id: DeploymentId,

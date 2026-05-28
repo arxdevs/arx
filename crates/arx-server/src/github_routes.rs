@@ -265,19 +265,13 @@ async fn handle_push(app: AppState, payload: serde_json::Value, event_id: String
     }
 
     for t in targets {
-        let app = app.clone();
-        tokio::spawn(async move {
-            let res = run_deploy(&app, &t).await;
-            if let Err(e) = res {
-                tracing::error!(error = %e, target = ?t, "auto-deploy failed");
-            }
-        });
+        crate::deploy_queue::enqueue(app.clone(), t);
     }
 
     mark_processed(&app, &event_id, None).await;
 }
 
-async fn run_deploy(
+pub(crate) async fn run_deploy_target(
     app: &AppState,
     t: &arx_db::queries::services::GitTarget,
 ) -> arx_core::Result<()> {

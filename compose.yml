@@ -14,6 +14,7 @@ services:
         aliases: [arx]
     environment:
       ARX_CONFIG: /etc/arx/config.toml
+      ARX_LISTEN: 0.0.0.0:7878
       RUST_LOG: info,arx=debug,sqlx=warn,tower_http=info
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:7878/health || exit 1"]

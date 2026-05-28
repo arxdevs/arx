@@ -773,6 +773,9 @@ async fn add_domain(
     let (_, _) = require_workspace_role(&app, user.user_id, &ws).await?;
     let (sid, eid, _) = resolve_se(&app, &ws, &proj, &svc, req.env.as_deref()).await?;
 
+    arx_build::validate::validate_hostname(&req.hostname)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
     if let Some(expected_ip) = app.config.server.public_ip {
         if let Err(e) = crate::dns_verify::verify_a_record(&req.hostname, expected_ip).await {
             return Err(ApiError::bad_request(format!(

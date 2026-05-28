@@ -26,7 +26,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            listen: "0.0.0.0:7878".parse().unwrap(),
+            listen: "127.0.0.1:7878".parse().unwrap(),
             public_url: None,
             public_ip: None,
         }

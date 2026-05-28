@@ -1,17 +1,21 @@
 use crate::state::AppState;
+use crate::supervisor::spawn_supervised;
 use arx_core::model::CertStatus;
 use serde::Deserialize;
 use std::time::Duration;
 use tracing::{debug, warn};
 
 pub fn spawn(app: AppState) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_secs(30));
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            ticker.tick().await;
-            if let Err(e) = tick(&app).await {
-                debug!(error = %e, "cert poll tick failed");
+    spawn_supervised("cert_poll", move || {
+        let app = app.clone();
+        async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(30));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                if let Err(e) = tick(&app).await {
+                    debug!(error = %e, "cert poll tick failed");
+                }
             }
         }
     });
@@ -30,10 +34,8 @@ async fn tick(app: &AppState) -> Result<(), Box<dyn std::error::Error + Send + S
         "{}/api/http/routers",
         app.config.traefik.admin_api_url.trim_end_matches('/')
     );
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()?;
-    let routers: Vec<RouterInfo> = match http.get(&url).send().await {
+    let req = app.http.get(&url).timeout(Duration::from_secs(5)).send();
+    let routers: Vec<RouterInfo> = match req.await {
         Ok(r) if r.status().is_success() => r.json().await?,
         Ok(r) => {
             debug!(status = %r.status(), "traefik api non-success");
