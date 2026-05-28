@@ -231,6 +231,14 @@ pub(crate) fn service_alias(svc: ServiceId, env: EnvironmentId) -> String {
     format!("arx-svc-{}", &hex[..12])
 }
 
+pub(crate) fn service_hostname(
+    project: &Project,
+    service: &Service,
+    environment: &Environment,
+) -> String {
+    format!("arx-{}-{}-{}", project.slug, service.slug, environment.slug)
+}
+
 fn hex_of(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
@@ -337,8 +345,6 @@ pub(crate) async fn deploy_docker_image(
         return Err(ApiError::internal(msg));
     }
 
-    let _ = (&project_slug, &env_slug, &service_slug);
-
     let container_name = format!(
         "arx-{}-{}",
         last8(&service_id.as_uuid().to_string()),
@@ -346,6 +352,7 @@ pub(crate) async fn deploy_docker_image(
     );
 
     let alias = service_alias(service_id, environment_id);
+    let hostname = service_hostname(ctx.project, ctx.service, ctx.environment);
 
     let port_str = injected
         .iter()
@@ -392,7 +399,7 @@ pub(crate) async fn deploy_docker_image(
         resources,
         restart: RestartPolicy::UnlessStopped,
         network: Some(network_name.clone()),
-        network_aliases: vec![alias.clone()],
+        network_aliases: vec![alias.clone(), hostname.clone()],
         labels,
     };
 

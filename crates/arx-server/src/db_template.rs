@@ -1,4 +1,4 @@
-use crate::deploy::{DeployContext, deploy_docker_image};
+use crate::deploy::{DeployContext, deploy_docker_image, service_hostname};
 use crate::error::ApiResult;
 use crate::state::AppState;
 use arx_core::model::{DbTemplate, Deployment, Environment, Project, Service, Workspace};
@@ -21,6 +21,7 @@ pub async fn deploy(
 
     let image = image_for(template, version);
     let port = default_port(template);
+    let host = service_hostname(project, service, environment);
 
     let mut env = Vec::new();
     let data_dir = match template {
@@ -68,7 +69,7 @@ pub async fn deploy(
         read_only: false,
     }];
 
-    let connection_url = connection_url(template, &creds);
+    let connection_url = connection_url(template, &creds, &host, port);
     let _ = variables::set(
         &app.db,
         &app.master_key,
@@ -84,8 +85,18 @@ pub async fn deploy(
         &app.master_key,
         service.id,
         environment.id,
-        "INTERNAL_HOST",
-        &container_hostname(service, environment),
+        "DATABASE_HOST",
+        &host,
+        false,
+    )
+    .await;
+    let _ = variables::set(
+        &app.db,
+        &app.master_key,
+        service.id,
+        environment.id,
+        "DATABASE_PORT",
+        &port.to_string(),
         false,
     )
     .await;
@@ -121,15 +132,15 @@ async fn ensure_credentials(
     let existing = variables::list(&app.db, &app.master_key, service.id, environment.id).await?;
     let mut user = existing
         .iter()
-        .find(|v| v.key == "ARX_DB_USER")
+        .find(|v| v.key == "DATABASE_USER")
         .and_then(|v| v.plaintext.clone());
     let mut password = existing
         .iter()
-        .find(|v| v.key == "ARX_DB_PASSWORD")
+        .find(|v| v.key == "DATABASE_PASSWORD")
         .and_then(|v| v.plaintext.clone());
     let mut db = existing
         .iter()
-        .find(|v| v.key == "ARX_DB_NAME")
+        .find(|v| v.key == "DATABASE_NAME")
         .and_then(|v| v.plaintext.clone());
 
     if user.is_none() || password.is_none() || db.is_none() {
@@ -137,9 +148,9 @@ async fn ensure_credentials(
             variables::for_injection(&app.db, &app.master_key, service.id, environment.id).await?;
         for (k, v) in injected {
             match k.as_str() {
-                "ARX_DB_USER" => user = Some(v),
-                "ARX_DB_PASSWORD" => password = Some(v),
-                "ARX_DB_NAME" => db = Some(v),
+                "DATABASE_USER" => user = Some(v),
+                "DATABASE_PASSWORD" => password = Some(v),
+                "DATABASE_NAME" => db = Some(v),
                 _ => {}
             }
         }
@@ -152,7 +163,7 @@ async fn ensure_credentials(
             &app.master_key,
             service.id,
             environment.id,
-            "ARX_DB_USER",
+            "DATABASE_USER",
             &u,
             false,
         )
@@ -166,7 +177,7 @@ async fn ensure_credentials(
             &app.master_key,
             service.id,
             environment.id,
-            "ARX_DB_PASSWORD",
+            "DATABASE_PASSWORD",
             &p,
             true,
         )
@@ -183,7 +194,7 @@ async fn ensure_credentials(
             &app.master_key,
             service.id,
             environment.id,
-            "ARX_DB_NAME",
+            "DATABASE_NAME",
             &d,
             false,
         )
@@ -226,9 +237,7 @@ fn default_port(t: DbTemplate) -> u16 {
     }
 }
 
-fn connection_url(t: DbTemplate, c: &Creds) -> String {
-    let host = "__INTERNAL_HOST__";
-    let port = default_port(t);
+fn connection_url(t: DbTemplate, c: &Creds, host: &str, port: u16) -> String {
     match t {
         DbTemplate::Postgres => format!(
             "postgresql://{user}:{pw}@{host}:{port}/{db}",
@@ -261,10 +270,6 @@ fn urlencode(s: &str) -> String {
             }
         })
         .collect()
-}
-
-fn container_hostname(service: &Service, environment: &Environment) -> String {
-    format!("arx-{}-{}", service.slug, environment.slug)
 }
 
 pub(crate) fn volume_name(service: &Service, environment: &Environment) -> String {
