@@ -339,6 +339,50 @@ pub fn validate_hostname(s: &str) -> Result<&str, BuildError> {
     Ok(s)
 }
 
+const MAX_WATCH_PATTERN_LEN: usize = 512;
+
+/// Accepts gitignore-style glob patterns for service `watch_paths`. Rejects
+/// empty strings, absolute paths, parent-traversal-only patterns, and shapes
+/// `globset` can't compile.
+pub fn validate_watch_pattern(s: &str) -> Result<&str, BuildError> {
+    if s.is_empty() {
+        return Err(BuildError::InvalidInput {
+            field: "watch_path",
+            reason: "empty".into(),
+        });
+    }
+    if s.len() > MAX_WATCH_PATTERN_LEN {
+        return Err(BuildError::InvalidInput {
+            field: "watch_path",
+            reason: "too long".into(),
+        });
+    }
+    if s.contains('\0') || s.contains('\n') || s.contains('\r') {
+        return Err(BuildError::InvalidInput {
+            field: "watch_path",
+            reason: "control character".into(),
+        });
+    }
+    if s.starts_with('/') {
+        return Err(BuildError::InvalidInput {
+            field: "watch_path",
+            reason: "absolute path not allowed".into(),
+        });
+    }
+    let trimmed = s.trim_end_matches('/');
+    if trimmed == ".." || trimmed.split('/').all(|seg| seg == ".." || seg.is_empty()) {
+        return Err(BuildError::InvalidInput {
+            field: "watch_path",
+            reason: "parent-traversal only".into(),
+        });
+    }
+    globset::Glob::new(s).map_err(|e| BuildError::InvalidInput {
+        field: "watch_path",
+        reason: format!("invalid glob: {e}"),
+    })?;
+    Ok(s)
+}
+
 pub fn validate_sha_hex(s: &str) -> Result<&str, BuildError> {
     if s.is_empty() || s.len() > 64 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(BuildError::InvalidInput {
@@ -438,6 +482,24 @@ mod tests {
         assert!(validate_sha_hex("deadbeef1234").is_ok());
         assert!(validate_sha_hex("deadbeef-rm").is_err());
         assert!(validate_sha_hex("").is_err());
+    }
+
+    #[test]
+    fn watch_pattern_happy() {
+        assert!(validate_watch_pattern("apps/web/**").is_ok());
+        assert!(validate_watch_pattern("**/pnpm-lock.yaml").is_ok());
+        assert!(validate_watch_pattern("package.json").is_ok());
+        assert!(validate_watch_pattern("packages/*/src/**/*.ts").is_ok());
+    }
+
+    #[test]
+    fn watch_pattern_rejects_bad() {
+        assert!(validate_watch_pattern("").is_err());
+        assert!(validate_watch_pattern("/etc/passwd").is_err());
+        assert!(validate_watch_pattern("..").is_err());
+        assert!(validate_watch_pattern("../../").is_err());
+        assert!(validate_watch_pattern("foo\nbar").is_err());
+        assert!(validate_watch_pattern(&"x".repeat(1024)).is_err());
     }
 
     #[test]
