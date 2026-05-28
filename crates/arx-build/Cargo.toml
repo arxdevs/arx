@@ -17,3 +17,7 @@ regex = { workspace = true }
 quick-xml = { workspace = true }
 semver = { workspace = true }
 toml = { workspace = true }
+globset = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
