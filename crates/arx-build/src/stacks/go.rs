@@ -25,7 +25,7 @@ impl StackBuilder for Go {
 
     fn render_dockerfile(&self, ov: &CommandOverrides<'_>) -> Result<String, BuildError> {
         let default_build = "CGO_ENABLED=0 go build -o /out/server ./...";
-        let default_start = "/server";
+        let default_start = "exec /server";
 
         let build_raw = ov.build_command.unwrap_or(default_build);
         let start_raw = ov.start_command.unwrap_or(default_start);
@@ -41,7 +41,10 @@ impl StackBuilder for Go {
              COPY . .\n\
              RUN sh -c '{build_quoted}'\n\
              \n\
-             FROM gcr.io/distroless/static-debian12\n\
+             FROM debian:bookworm-slim\n\
+             RUN apt-get update \\\n\
+                 && apt-get install -y --no-install-recommends ca-certificates \\\n\
+                 && rm -rf /var/lib/apt/lists/*\n\
              COPY --from=build /out/server /server\n\
              ENV PORT=8080\n\
              EXPOSE 8080\n\
