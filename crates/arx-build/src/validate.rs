@@ -302,6 +302,43 @@ pub fn cmd_to_json_token(cmd: &str, field: &'static str) -> Result<String, Build
     })
 }
 
+fn hostname_label_re() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| Regex::new(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$").unwrap())
+}
+
+pub fn validate_hostname(s: &str) -> Result<&str, BuildError> {
+    if s.is_empty() || s.len() > 253 {
+        return Err(BuildError::InvalidInput {
+            field: "hostname",
+            reason: "length must be 1..=253".into(),
+        });
+    }
+    if s.chars().any(|c| c.is_ascii_uppercase()) {
+        return Err(BuildError::InvalidInput {
+            field: "hostname",
+            reason: "must be lowercase".into(),
+        });
+    }
+    let trimmed = s.strip_suffix('.').unwrap_or(s);
+    if trimmed.is_empty() {
+        return Err(BuildError::InvalidInput {
+            field: "hostname",
+            reason: "empty after trailing dot".into(),
+        });
+    }
+    let re = hostname_label_re();
+    for label in trimmed.split('.') {
+        if !re.is_match(label) {
+            return Err(BuildError::InvalidInput {
+                field: "hostname",
+                reason: format!("invalid label: {label:?}"),
+            });
+        }
+    }
+    Ok(s)
+}
+
 pub fn validate_sha_hex(s: &str) -> Result<&str, BuildError> {
     if s.is_empty() || s.len() > 64 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(BuildError::InvalidInput {
@@ -401,5 +438,29 @@ mod tests {
         assert!(validate_sha_hex("deadbeef1234").is_ok());
         assert!(validate_sha_hex("deadbeef-rm").is_err());
         assert!(validate_sha_hex("").is_err());
+    }
+
+    #[test]
+    fn hostname_happy() {
+        assert!(validate_hostname("a.com").is_ok());
+        assert!(validate_hostname("a").is_ok());
+        assert!(validate_hostname("sub.example.co.kr").is_ok());
+        assert!(validate_hostname("xn--p1ai").is_ok());
+        assert!(validate_hostname("a.com.").is_ok());
+    }
+
+    #[test]
+    fn hostname_rejects_bad() {
+        assert!(validate_hostname("").is_err());
+        assert!(validate_hostname(" foo").is_err());
+        assert!(validate_hostname("foo ").is_err());
+        assert!(validate_hostname("-bad").is_err());
+        assert!(validate_hostname("bad-").is_err());
+        assert!(validate_hostname("a..b").is_err());
+        assert!(validate_hostname("UPPER.com").is_err());
+        assert!(validate_hostname("foo\n.com").is_err());
+        assert!(validate_hostname("evil`Host(`bad.com`)`").is_err());
+        assert!(validate_hostname(&"a".repeat(64)).is_err());
+        assert!(validate_hostname(&format!("{}.com", "a".repeat(250))).is_err());
     }
 }

@@ -68,6 +68,10 @@ async fn patch_settings(
     Json(req): Json<PatchSettingsReq>,
 ) -> ApiResult<Json<ServerSettingsResp>> {
     if let Some(d) = req.admin_domain {
+        if !d.is_empty() {
+            arx_build::validate::validate_hostname(&d)
+                .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        }
         arx_db::queries::settings::set_admin_domain(
             &app.db,
             if d.is_empty() { None } else { Some(&d) },
