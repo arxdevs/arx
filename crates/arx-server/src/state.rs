@@ -5,6 +5,7 @@ use arx_db::crypto::MasterKey;
 use arx_docker::DockerEngine;
 use arx_traefik::TraefikWriter;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -20,6 +21,7 @@ pub struct AppState {
     pub deploy_locks: DeployLockMap,
     pub traefik_lock: Arc<AsyncMutex<()>>,
     pub deploy_queue: crate::deploy_queue::DeployQueue,
+    pub in_flight_deploys: Arc<AtomicUsize>,
     pub http: reqwest::Client,
 }
 

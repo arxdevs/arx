@@ -2,6 +2,7 @@ use crate::state::AppState;
 use arx_core::ids::{EnvironmentId, ServiceId};
 use arx_db::queries::services::GitTarget;
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 pub type CoalesceKey = (ServiceId, EnvironmentId);
@@ -28,6 +29,7 @@ pub fn enqueue(app: AppState, target: GitTarget) {
     map.insert(key, Slot::default());
     drop(map);
 
+    app.in_flight_deploys.fetch_add(1, Ordering::SeqCst);
     tokio::spawn(run_loop(app, key, target));
 }
 
@@ -52,4 +54,5 @@ async fn run_loop(app: AppState, key: CoalesceKey, initial: GitTarget) {
             None => break,
         }
     }
+    app.in_flight_deploys.fetch_sub(1, Ordering::SeqCst);
 }
