@@ -19,6 +19,7 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub deploy_locks: DeployLockMap,
     pub traefik_lock: Arc<AsyncMutex<()>>,
+    pub deploy_queue: crate::deploy_queue::DeployQueue,
     pub http: reqwest::Client,
 }
 

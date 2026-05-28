@@ -6,6 +6,7 @@ mod cascade;
 mod cert_poll;
 mod db_template;
 mod deploy;
+mod deploy_queue;
 mod dns_verify;
 mod error;
 mod github_routes;
@@ -101,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
         config: Arc::new(cfg.clone()),
         deploy_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         traefik_lock: Arc::new(tokio::sync::Mutex::new(())),
+        deploy_queue: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         http,
     };
 
