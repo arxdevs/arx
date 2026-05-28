@@ -20,6 +20,7 @@ use arx_db::crypto::MasterKey;
 use arx_docker::DockerEngine;
 use arx_traefik::TraefikWriter;
 use clap::Parser;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
@@ -35,6 +36,9 @@ struct Cli {
         default_value = "/etc/arx/config.toml"
     )]
     config: PathBuf,
+
+    #[arg(long, env = "ARX_LISTEN")]
+    listen: Option<SocketAddr>,
 }
 
 #[tokio::main]
@@ -42,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
     init_tracing();
 
     let cli = Cli::parse();
-    let cfg = if cli.config.exists() {
+    let mut cfg = if cli.config.exists() {
         Config::load(&cli.config).context("loading config")?
     } else {
         tracing::warn!(
@@ -55,6 +59,9 @@ async fn main() -> anyhow::Result<()> {
             traefik: Default::default(),
         }
     };
+    if let Some(addr) = cli.listen {
+        cfg.server.listen = addr;
+    }
 
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "arx-server starting");
 
