@@ -216,12 +216,35 @@ async fn webhook(
         "push" => {
             handle_push(app.clone(), payload.clone(), id.to_string()).await;
         }
+        // Installation membership changed. The webhook is only a fast path; we
+        // re-derive the full installation set from the API (the truth source)
+        // rather than trusting the payload, so a missed delivery self-heals.
+        "installation" | "installation_repositories" => {
+            handle_installation_change(app.clone(), id.to_string()).await;
+        }
         other => {
             tracing::info!(event = other, "unhandled event");
         }
     }
 
     Ok(Json(json!({"ok": true})))
+}
+
+async fn handle_installation_change(app: AppState, event_id: String) {
+    match crate::github_sync::reconcile_installations(&app).await {
+        Ok(report) => {
+            tracing::info!(
+                installations = report.installations,
+                repos = report.repos,
+                "reconciled github installations from webhook"
+            );
+            mark_processed(&app, &event_id, None).await;
+        }
+        Err(e) => {
+            tracing::error!(error = %e.2, "installation reconcile from webhook failed");
+            mark_processed(&app, &event_id, Some(&e.2)).await;
+        }
+    }
 }
 
 async fn handle_push(app: AppState, payload: serde_json::Value, event_id: String) {

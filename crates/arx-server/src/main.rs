@@ -10,6 +10,7 @@ mod deploy_queue;
 mod dns_verify;
 mod error;
 mod github_routes;
+mod github_sync;
 mod setup;
 mod state;
 mod supervisor;

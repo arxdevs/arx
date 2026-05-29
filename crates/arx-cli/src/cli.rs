@@ -148,6 +148,13 @@ pub(crate) enum ServerCmd {
 
     #[command(subcommand)]
     Cert(ServerCertCmd),
+
+    /// Re-sync GitHub App installations and their repositories from GitHub
+    Sync {
+        /// Also re-point the GitHub App's webhook URL at the current domain
+        #[arg(long)]
+        app: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

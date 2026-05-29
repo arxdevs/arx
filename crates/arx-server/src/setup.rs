@@ -16,6 +16,27 @@ pub fn routes() -> Router<AppState> {
             get(get_settings).patch(patch_settings),
         )
         .route("/v1/server/cert/retry", post(cert_retry))
+        .route("/v1/server/github/sync", post(sync_github))
+}
+
+#[derive(Deserialize)]
+struct SyncParams {
+    /// When true, also re-point the GitHub App's webhook URL at the current
+    /// admin domain (handles a stale setup-time placeholder).
+    #[serde(default)]
+    app: bool,
+}
+
+async fn sync_github(
+    crate::auth::Auth(_): crate::auth::Auth,
+    State(app): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<SyncParams>,
+) -> ApiResult<Json<crate::github_sync::SyncReport>> {
+    let mut report = crate::github_sync::reconcile_installations(&app).await?;
+    if params.app {
+        report.webhook_url = crate::github_sync::update_app_webhook_url(&app).await?;
+    }
+    Ok(Json(report))
 }
 
 async fn cert_retry(
@@ -67,10 +88,12 @@ async fn patch_settings(
     State(app): State<AppState>,
     Json(req): Json<PatchSettingsReq>,
 ) -> ApiResult<Json<ServerSettingsResp>> {
+    let mut admin_domain_set = false;
     if let Some(d) = req.admin_domain {
         if !d.is_empty() {
             arx_build::validate::validate_hostname(&d)
                 .map_err(|e| ApiError::bad_request(e.to_string()))?;
+            admin_domain_set = true;
         }
         arx_db::queries::settings::set_admin_domain(
             &app.db,
@@ -94,6 +117,19 @@ async fn patch_settings(
     }
 
     crate::deploy::rewrite_traefik(&app).await?;
+
+    // When the admin domain changes, the GitHub App's webhook URL (which is
+    // derived from it) goes stale. Re-point it best-effort — only if an App is
+    // configured, and never failing the settings update on a GitHub hiccup.
+    if admin_domain_set && gh_q::get_app(&app.db, &app.master_key).await?.is_some() {
+        match crate::github_sync::update_app_webhook_url(&app).await {
+            Ok(Some(url)) => tracing::info!(url, "updated github app webhook url for new domain"),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(error = %e.2, "failed to update github app webhook url")
+            }
+        }
+    }
 
     let s = arx_db::queries::settings::get(&app.db).await?;
     Ok(Json(ServerSettingsResp {

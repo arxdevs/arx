@@ -140,13 +140,17 @@ async fn deploy_git_source(
     let cloner = arx_build::Cloner::new(app.config.paths.repos_dir.clone());
     let key = format!("{}-{}", service.id.as_uuid(), sanitize(branch));
 
+    // Authenticate the clone with an installation token when one covers this
+    // repo; public repos (no mapped installation) fall back to anonymous.
+    let token = crate::github_sync::clone_token_for_repo(app, github_repo).await?;
+
     let (path, sha) = cloner
         .checkout(
             &key,
             &arx_build::GitOpts {
                 url,
                 branch: branch.to_string(),
-                token: None,
+                token,
             },
         )
         .await

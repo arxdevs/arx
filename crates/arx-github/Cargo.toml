@@ -18,3 +18,4 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 subtle = { workspace = true }
 hex = "0.4"
+jsonwebtoken = "9"
