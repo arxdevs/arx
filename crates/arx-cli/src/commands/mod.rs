@@ -803,9 +803,14 @@ pub(crate) async fn dispatch(
                 .unwrap_or(Value::Null);
             print_value(&v, cli.json);
         }
-        Command::Server(ServerCmd::Sync) => {
+        Command::Server(ServerCmd::Sync { app }) => {
+            let path = if app {
+                "/v1/server/github/sync?app=true"
+            } else {
+                "/v1/server/github/sync"
+            };
             let v = client
-                .request(reqwest::Method::POST, "/v1/server/github/sync", None)
+                .request(reqwest::Method::POST, path, None)
                 .await?
                 .unwrap_or(Value::Null);
             print_value(&v, cli.json);

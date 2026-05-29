@@ -14,6 +14,9 @@ use arx_db::queries::github as gh_q;
 pub struct SyncReport {
     pub installations: usize,
     pub repos: usize,
+    /// The webhook URL pointed at the App, when `--app` reconciliation ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhook_url: Option<String>,
 }
 
 /// Reconciles installations and their repositories from the GitHub API.
@@ -59,7 +62,34 @@ pub async fn reconcile_installations(app: &AppState) -> ApiResult<SyncReport> {
     Ok(SyncReport {
         installations: installations.len(),
         repos: total_repos,
+        webhook_url: None,
     })
+}
+
+/// Re-points the GitHub App's webhook URL at this server's current admin domain
+/// via the REST API. Returns the URL that was set, or `Ok(None)` if no admin
+/// domain is configured yet (nothing to point at).
+///
+/// Only the webhook URL is updatable via REST; a GitHub App's callback and
+/// homepage URLs cannot be changed this way (see
+/// [`arx_github::api::update_hook_url`]) and must be fixed in the App settings
+/// UI or by re-running the manifest flow.
+pub async fn update_app_webhook_url(app: &AppState) -> ApiResult<Option<String>> {
+    let settings = arx_db::queries::settings::get(&app.db).await?;
+    let Some(domain) = settings.admin_domain else {
+        return Ok(None);
+    };
+    let webhook_url = format!("https://{domain}/v1/webhooks/github");
+
+    let creds = gh_q::get_app(&app.db, &app.master_key)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("github app not configured"))?;
+    let jwt = arx_github::app_jwt(creds.app_id, &creds.private_key_pem)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    arx_github::api::update_hook_url(&app.http, &jwt, &webhook_url)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Some(webhook_url))
 }
 
 /// Mints a short-lived installation access token for cloning `repo_full_name`,
