@@ -419,6 +419,38 @@ pub fn validate_env_name(s: &str) -> Result<&str, BuildError> {
     Ok(s)
 }
 
+fn package_manager_re() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"^(pnpm|yarn|npm)@\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?(\+[0-9A-Za-z._-]+)?$").unwrap()
+    })
+}
+
+/// Validate a package.json `packageManager` value (a corepack spec) before it is
+/// dropped into a `corepack prepare <spec>` RUN line. Returns the sanitized spec
+/// (integrity `+hash` suffix preserved), or None for anything that isn't a
+/// strict `name@x.y.z` — notably rejecting `latest`/ranges and injection.
+pub fn parse_package_manager(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s.len() > 256 {
+        return None;
+    }
+    package_manager_re().is_match(s).then(|| s.to_string())
+}
+
+/// A relative path safe to embed in a Dockerfile `COPY ["src","dest"]` exec
+/// form. Rejects absolute paths, parent traversal, and characters that would
+/// break the JSON array form or escape the build context.
+pub fn is_safe_copy_path(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 1024
+        && !s.starts_with('/')
+        && !s.contains("..")
+        && !s.contains('"')
+        && !s.contains('\\')
+        && !s.chars().any(|c| c.is_control())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
