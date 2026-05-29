@@ -379,9 +379,13 @@ pub(crate) async fn deploy_docker_image(
     let alias = service_alias(service_id, environment_id);
     let hostname = service_hostname(ctx.project, ctx.service, ctx.environment);
 
+    // Prefer PORT over ARX_PORT, matching the precedence the traefik rewrite
+    // uses when reading variables_snapshot, so the container port and the
+    // routed port never disagree when both vars are set.
     let port_str = injected
         .iter()
-        .find(|(k, _)| k == "PORT" || k == "ARX_PORT")
+        .find(|(k, _)| k == "PORT")
+        .or_else(|| injected.iter().find(|(k, _)| k == "ARX_PORT"))
         .map(|(_, v)| v.clone())
         .unwrap_or_else(|| "8080".to_string());
     let port: u16 = port_str.parse().unwrap_or(8080);
