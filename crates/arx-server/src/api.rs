@@ -104,6 +104,10 @@ pub fn router(state: AppState) -> Router {
             get(stream_logs),
         )
         .route(
+            "/v1/workspaces/:ws/projects/:proj/services/:svc/exec",
+            get(exec_ws),
+        )
+        .route(
             "/v1/workspaces/:ws/projects/:proj/services/:svc/backups",
             get(list_backups).post(backup_now),
         )
@@ -1420,6 +1424,103 @@ async fn stream_logs(
     Ok(Sse::new(sse_stream)
         .keep_alive(axum::response::sse::KeepAlive::default())
         .into_response())
+}
+
+#[derive(Deserialize, Default)]
+struct ExecQuery {
+    #[serde(default)]
+    env: Option<String>,
+    /// Command to run via `sh -lc`. Empty/absent opens an interactive shell.
+    #[serde(default)]
+    cmd: Option<String>,
+    #[serde(default)]
+    tty: bool,
+}
+
+async fn exec_ws(
+    ws: axum::extract::ws::WebSocketUpgrade,
+    Auth(user): Auth,
+    State(app): State<AppState>,
+    Path((ws_slug, proj, svc)): Path<(String, String, String)>,
+    axum::extract::Query(q): axum::extract::Query<ExecQuery>,
+) -> ApiResult<axum::response::Response> {
+    use sqlx::Row;
+    let (_, _) = require_workspace_role(&app, user.user_id, &ws_slug).await?;
+    let (sid, eid, _) = resolve_se(&app, &ws_slug, &proj, &svc, q.env.as_deref()).await?;
+
+    let row = sqlx::query(
+        "SELECT container_id FROM deployments
+         WHERE service_id = ? AND environment_id = ? AND status = 'live'
+            AND container_id IS NOT NULL
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(sid.as_uuid().to_string())
+    .bind(eid.as_uuid().to_string())
+    .fetch_optional(&app.db)
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    let row = row.ok_or_else(ApiError::not_found)?;
+    let container_id: String = row
+        .try_get("container_id")
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let cmd = match q.cmd.as_deref().filter(|c| !c.is_empty()) {
+        Some(c) => vec!["sh".to_string(), "-lc".to_string(), c.to_string()],
+        None => vec!["sh".to_string()],
+    };
+    let tty = q.tty;
+
+    Ok(ws.on_upgrade(move |socket| async move {
+        if let Err(e) = run_exec_session(socket, app, container_id, cmd, tty).await {
+            tracing::warn!(error = %e, "exec session ended with error");
+        }
+    }))
+}
+
+async fn run_exec_session(
+    socket: axum::extract::ws::WebSocket,
+    app: AppState,
+    container_id: String,
+    cmd: Vec<String>,
+    tty: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use axum::extract::ws::Message;
+    use futures::{SinkExt, StreamExt};
+    use tokio::io::AsyncWriteExt;
+
+    let session = app.docker.exec(&container_id, cmd, tty).await?;
+    let mut output = session.output;
+    let mut input = session.input;
+    let (mut ws_tx, mut ws_rx) = socket.split();
+
+    loop {
+        tokio::select! {
+            chunk = output.next() => match chunk {
+                Some(Ok(bytes)) => {
+                    if ws_tx.send(Message::Binary(bytes)).await.is_err() {
+                        break;
+                    }
+                }
+                Some(Err(e)) => return Err(e.into()),
+                None => break,
+            },
+            msg = ws_rx.next() => match msg {
+                Some(Ok(Message::Binary(b))) => {
+                    input.write_all(&b).await?;
+                    input.flush().await?;
+                }
+                Some(Ok(Message::Text(t))) => {
+                    input.write_all(t.as_bytes()).await?;
+                    input.flush().await?;
+                }
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(_)) => {}
+                Some(Err(e)) => return Err(e.into()),
+            },
+        }
+    }
+    let _ = ws_tx.send(Message::Close(None)).await;
+    Ok(())
 }
 
 async fn list_deployments(
