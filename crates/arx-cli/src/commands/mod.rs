@@ -377,6 +377,7 @@ pub(crate) async fn dispatch(
                 slug,
                 build_command,
                 start_command,
+                restart_policy,
             } => {
                 let w = ws(cli.workspace.as_deref())?;
                 let p = pr(cli.project.as_deref())?;
@@ -401,9 +402,13 @@ pub(crate) async fn dispatch(
                         },
                     );
                 }
+                if let Some(rp) = restart_policy {
+                    body.insert("restart_policy".into(), Value::String(rp));
+                }
                 if body.is_empty() {
                     return Err(CliError::Usage(
-                        "specify at least one of --build-cmd / --start-cmd".into(),
+                        "specify at least one of --build-cmd / --start-cmd / --restart-policy"
+                            .into(),
                     )
                     .into());
                 }

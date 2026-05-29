@@ -113,6 +113,8 @@ pub struct Service {
     /// `None` = use the auto-detected stack's default.
     pub build_command: Option<String>,
     pub start_command: Option<String>,
+    /// Docker restart policy: "no" | "unless-stopped" | "always" | "on-failure".
+    pub restart_policy: String,
     pub created_at: DateTime<Utc>,
 }
 
