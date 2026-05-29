@@ -106,6 +106,13 @@ pub(crate) enum Command {
         service: String,
     },
 
+    /// Run a command in (or open a shell on) a service's live container.
+    Exec {
+        service: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        cmd: Vec<String>,
+    },
+
     Deployments {
         service: String,
     },

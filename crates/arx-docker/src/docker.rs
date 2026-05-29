@@ -5,6 +5,7 @@ use bollard::container::{
     Config, CreateContainerOptions, LogOutput, LogsOptions, RemoveContainerOptions,
     StopContainerOptions,
 };
+use bollard::exec::{CreateExecOptions, StartExecOptions, StartExecResults};
 use bollard::image::CreateImageOptions;
 use bollard::models::{
     ContainerStateStatusEnum, EndpointSettings, HostConfig, Mount as BollardMount, MountTypeEnum,
@@ -32,6 +33,57 @@ impl DockerEngine {
     #[cfg(test)]
     pub fn from_docker(docker: Docker) -> Self {
         Self { docker }
+    }
+
+    /// Start an interactive `docker exec` in a running container, returning a
+    /// byte stream of combined output and a writer for stdin.
+    pub async fn exec(
+        &self,
+        container: &str,
+        cmd: Vec<String>,
+        tty: bool,
+    ) -> Result<ExecSession, EngineError> {
+        let created = self
+            .docker
+            .create_exec(
+                container,
+                CreateExecOptions {
+                    attach_stdin: Some(true),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    tty: Some(tty),
+                    cmd: Some(cmd),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(map_err)?;
+        match self
+            .docker
+            .start_exec(
+                &created.id,
+                Some(StartExecOptions {
+                    detach: false,
+                    tty,
+                    output_capacity: None,
+                }),
+            )
+            .await
+            .map_err(map_err)?
+        {
+            StartExecResults::Attached { output, input } => {
+                let output = output
+                    .map(|item| {
+                        item.map(|lo| lo.into_bytes().to_vec())
+                            .map_err(|e| EngineError::Io(e.to_string()))
+                    })
+                    .boxed();
+                Ok(ExecSession { output, input })
+            }
+            StartExecResults::Detached => {
+                Err(EngineError::Other("exec returned detached".to_string()))
+            }
+        }
     }
 }
 

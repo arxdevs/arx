@@ -18,6 +18,108 @@ fn pr(opt: Option<&str>) -> Result<&str> {
     opt.ok_or_else(|| CliError::Usage("project not set (-p / ARX_PROJECT)".into()).into())
 }
 
+async fn exec_session(
+    client: &Client,
+    w: &str,
+    p: &str,
+    service: &str,
+    env: &str,
+    cmd: Vec<String>,
+) -> Result<()> {
+    use futures::{SinkExt, StreamExt};
+    use std::io::IsTerminal;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+
+    let base = client.server.trim_end_matches('/');
+    let ws_base = if let Some(rest) = base.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = base.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        base.to_string()
+    };
+    let mut url = reqwest::Url::parse(&format!(
+        "{ws_base}/v1/workspaces/{w}/projects/{p}/services/{service}/exec"
+    ))
+    .map_err(|e| CliError::Usage(e.to_string()))?;
+    {
+        let mut qp = url.query_pairs_mut();
+        qp.append_pair("env", env);
+        qp.append_pair("tty", &tty.to_string());
+        if !cmd.is_empty() {
+            qp.append_pair("cmd", &cmd.join(" "));
+        }
+    }
+
+    let mut request = url
+        .as_str()
+        .into_client_request()
+        .map_err(|e| CliError::Network(e.to_string()))?;
+    if let Some(token) = &client.token {
+        request.headers_mut().insert(
+            "authorization",
+            format!("Bearer {token}")
+                .parse()
+                .map_err(|_| CliError::Usage("invalid token".into()))?,
+        );
+    }
+
+    let (stream, _resp) = tokio_tungstenite::connect_async(request)
+        .await
+        .map_err(|e| CliError::Network(e.to_string()))?;
+    let (mut write, mut read) = stream.split();
+
+    let raw = tty && crossterm::terminal::enable_raw_mode().is_ok();
+
+    let stdin_task = tokio::spawn(async move {
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 4096];
+        loop {
+            match stdin.read(&mut buf).await {
+                Ok(0) | Err(_) => {
+                    let _ = write.send(Message::Close(None)).await;
+                    break;
+                }
+                Ok(n) => {
+                    if write
+                        .send(Message::Binary(buf[..n].to_vec().into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    let mut stdout = tokio::io::stdout();
+    while let Some(msg) = read.next().await {
+        match msg {
+            Ok(Message::Binary(b)) => {
+                let _ = stdout.write_all(&b).await;
+                let _ = stdout.flush().await;
+            }
+            Ok(Message::Text(t)) => {
+                let _ = stdout.write_all(t.as_bytes()).await;
+                let _ = stdout.flush().await;
+            }
+            Ok(Message::Close(_)) | Err(_) => break,
+            _ => {}
+        }
+    }
+
+    stdin_task.abort();
+    if raw {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+    Ok(())
+}
+
 /// Parse a relative duration like `1h`/`30m`/`10s`/`2d` into the unix timestamp
 /// that many seconds ago.
 fn parse_since_to_unix(s: &str) -> Option<i64> {
@@ -682,6 +784,12 @@ pub(crate) async fn dispatch(
                 .await?
                 .unwrap_or(Value::Null);
             print_value(&v, cli.json);
+        }
+        Command::Exec { service, cmd } => {
+            let w = ws(cli.workspace.as_deref())?;
+            let p = pr(cli.project.as_deref())?;
+            let env = cli.env.clone().unwrap_or_else(|| "production".into());
+            exec_session(&client, w, p, &service, &env, cmd).await?;
         }
         Command::Config(ConfigCmd::Show { service }) => {
             let w = ws(cli.workspace.as_deref())?;

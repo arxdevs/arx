@@ -131,6 +131,13 @@ pub struct LogOptions {
     pub since: Option<i64>,
 }
 
+/// A live `docker exec` attachment: a byte stream of combined stdout/stderr and
+/// a writer for the exec's stdin.
+pub struct ExecSession {
+    pub output: BoxStream<'static, std::result::Result<Vec<u8>, EngineError>>,
+    pub input: std::pin::Pin<Box<dyn tokio::io::AsyncWrite + Send>>,
+}
+
 #[derive(Debug, Error)]
 pub enum EngineError {
     #[error("not found: {0}")]
