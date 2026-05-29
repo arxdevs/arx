@@ -1353,6 +1353,10 @@ struct LogQuery {
     env: Option<String>,
     #[serde(default)]
     follow: bool,
+    #[serde(default)]
+    tail: Option<u32>,
+    #[serde(default)]
+    since: Option<i64>,
 }
 
 async fn stream_logs(
@@ -1389,7 +1393,14 @@ async fn stream_logs(
     let handle = arx_docker::ContainerHandle(container_id);
     let stream = app
         .docker
-        .logs(&handle, q.follow)
+        .logs(
+            &handle,
+            arx_docker::LogOptions {
+                follow: q.follow,
+                tail: q.tail,
+                since: q.since,
+            },
+        )
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 

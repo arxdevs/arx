@@ -122,6 +122,15 @@ pub enum LogStreamKind {
 
 pub type LogStream = BoxStream<'static, std::result::Result<LogLine, EngineError>>;
 
+#[derive(Debug, Clone, Default)]
+pub struct LogOptions {
+    pub follow: bool,
+    /// Last N lines; `None` = all.
+    pub tail: Option<u32>,
+    /// Only logs at or after this unix timestamp (seconds); `None` = from start.
+    pub since: Option<i64>,
+}
+
 #[derive(Debug, Error)]
 pub enum EngineError {
     #[error("not found: {0}")]
@@ -173,5 +182,9 @@ pub trait ContainerEngine: Send + Sync + 'static {
 
     async fn internal_address(&self, handle: &ContainerHandle) -> Result<String, EngineError>;
 
-    async fn logs(&self, handle: &ContainerHandle, follow: bool) -> Result<LogStream, EngineError>;
+    async fn logs(
+        &self,
+        handle: &ContainerHandle,
+        opts: LogOptions,
+    ) -> Result<LogStream, EngineError>;
 }

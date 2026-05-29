@@ -115,6 +115,12 @@ pub(crate) enum Command {
 
         #[arg(short, long)]
         follow: bool,
+        /// Show only the last N lines.
+        #[arg(long)]
+        tail: Option<u32>,
+        /// Only logs newer than a relative duration, e.g. 1h, 30m, 10s, 2d.
+        #[arg(long)]
+        since: Option<String>,
     },
 
     #[command(subcommand)]
