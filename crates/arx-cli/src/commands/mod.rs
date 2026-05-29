@@ -18,6 +18,26 @@ fn pr(opt: Option<&str>) -> Result<&str> {
     opt.ok_or_else(|| CliError::Usage("project not set (-p / ARX_PROJECT)".into()).into())
 }
 
+/// Parse a relative duration like `1h`/`30m`/`10s`/`2d` into the unix timestamp
+/// that many seconds ago.
+fn parse_since_to_unix(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let (num, unit) = s.split_at(s.len().checked_sub(1)?);
+    let n: i64 = num.parse().ok()?;
+    let secs = match unit {
+        "s" => n,
+        "m" => n * 60,
+        "h" => n * 3600,
+        "d" => n * 86400,
+        _ => return None,
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    Some(now - secs)
+}
+
 pub(crate) async fn dispatch(
     cli: Cli,
     server: String,
@@ -800,15 +820,31 @@ pub(crate) async fn dispatch(
                 .unwrap_or(Value::Null);
             print_value(&v, cli.json);
         }
-        Command::Logs { service, follow } => {
+        Command::Logs {
+            service,
+            follow,
+            tail,
+            since,
+        } => {
             use futures::StreamExt;
             let w = ws(cli.workspace.as_deref())?;
             let p = pr(cli.project.as_deref())?;
             let env = cli.env.unwrap_or_else(|| "production".into());
-            let url = format!(
+            let mut url = format!(
                 "{}/v1/workspaces/{w}/projects/{p}/services/{service}/logs?env={env}&follow={follow}",
                 client.server.trim_end_matches('/')
             );
+            if let Some(t) = tail {
+                url.push_str(&format!("&tail={t}"));
+            }
+            if let Some(s) = &since {
+                match parse_since_to_unix(s) {
+                    Some(ts) => url.push_str(&format!("&since={ts}")),
+                    None => bail!(CliError::Usage(
+                        "invalid --since; use a duration like 1h, 30m, 10s".into()
+                    )),
+                }
+            }
             let mut req = client.http.get(&url).header("accept", "text/event-stream");
             if let Some(t) = &client.token {
                 req = req.bearer_auth(t);

@@ -35,6 +35,19 @@ impl DockerEngine {
     }
 }
 
+/// Split a `timestamps: true` docker log line ("<rfc3339> <message>") into its
+/// real emission time and the message, falling back to now if it doesn't parse.
+fn split_log_ts(message: &[u8]) -> (chrono::DateTime<chrono::Utc>, String) {
+    let raw = String::from_utf8_lossy(message);
+    let trimmed = raw.trim_end_matches(['\n', '\r']);
+    if let Some((ts, rest)) = trimmed.split_once(' ') {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+            return (dt.with_timezone(&chrono::Utc), rest.to_string());
+        }
+    }
+    (chrono::Utc::now(), trimmed.to_string())
+}
+
 fn map_err(e: bollard::errors::Error) -> EngineError {
     use bollard::errors::Error::*;
     match e {
@@ -308,29 +321,42 @@ impl ContainerEngine for DockerEngine {
         ))
     }
 
-    async fn logs(&self, handle: &ContainerHandle, follow: bool) -> Result<LogStream, EngineError> {
-        let opts = LogsOptions::<String> {
-            follow,
+    async fn logs(
+        &self,
+        handle: &ContainerHandle,
+        opts: LogOptions,
+    ) -> Result<LogStream, EngineError> {
+        let logs_opts = LogsOptions::<String> {
+            follow: opts.follow,
             stdout: true,
             stderr: true,
             timestamps: true,
+            tail: opts
+                .tail
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "all".to_string()),
+            since: opts.since.unwrap_or(0),
             ..Default::default()
         };
-        let stream = self.docker.logs(&handle.0, Some(opts));
+        let stream = self.docker.logs(&handle.0, Some(logs_opts));
         let mapped = stream
             .map(|item| match item {
                 Ok(LogOutput::StdOut { message }) | Ok(LogOutput::Console { message }) => {
+                    let (timestamp, line) = split_log_ts(&message);
                     Ok(LogLine {
                         stream: LogStreamKind::Stdout,
-                        line: String::from_utf8_lossy(&message).into_owned(),
-                        timestamp: chrono::Utc::now(),
+                        line,
+                        timestamp,
                     })
                 }
-                Ok(LogOutput::StdErr { message }) => Ok(LogLine {
-                    stream: LogStreamKind::Stderr,
-                    line: String::from_utf8_lossy(&message).into_owned(),
-                    timestamp: chrono::Utc::now(),
-                }),
+                Ok(LogOutput::StdErr { message }) => {
+                    let (timestamp, line) = split_log_ts(&message);
+                    Ok(LogLine {
+                        stream: LogStreamKind::Stderr,
+                        line,
+                        timestamp,
+                    })
+                }
                 Ok(LogOutput::StdIn { .. }) => Ok(LogLine {
                     stream: LogStreamKind::Stdout,
                     line: String::new(),
