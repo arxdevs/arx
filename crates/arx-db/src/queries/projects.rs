@@ -54,6 +54,19 @@ pub async fn create(
     })
 }
 
+pub async fn rename(pool: &SqlitePool, id: ProjectId, name: &str) -> Result<()> {
+    let res = sqlx::query("UPDATE projects SET name = ? WHERE id = ?")
+        .bind(name)
+        .bind(id.as_uuid().to_string())
+        .execute(pool)
+        .await
+        .map_err(map_sqlx)?;
+    if res.rows_affected() == 0 {
+        return Err(Error::NotFound);
+    }
+    Ok(())
+}
+
 pub async fn get_by_id(pool: &SqlitePool, id: ProjectId) -> Result<Project> {
     let row =
         sqlx::query("SELECT id, workspace_id, slug, name, created_at FROM projects WHERE id = ?")
