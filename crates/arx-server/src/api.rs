@@ -92,6 +92,10 @@ pub fn router(state: AppState) -> Router {
             post(rollback_service),
         )
         .route(
+            "/v1/workspaces/:ws/projects/:proj/services/:svc/restart",
+            post(restart_service),
+        )
+        .route(
             "/v1/workspaces/:ws/projects/:proj/services/:svc/deployments",
             get(list_deployments),
         )
@@ -1260,6 +1264,70 @@ async fn rollback_service(
             "new_deployment": d.id.as_uuid().to_string(),
             "env": e.slug,
         }),
+    )
+    .await;
+
+    Ok(Json(DeploymentResp {
+        id: d.id.as_uuid().to_string(),
+        status: d.status.as_str(),
+        image_ref: d.image_ref,
+        commit_sha: d.commit_sha,
+        container_id: d.container_id,
+        error: d.error,
+        created_at: d.created_at.to_rfc3339(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct RestartReq {
+    #[serde(default)]
+    env: Option<String>,
+}
+
+async fn restart_service(
+    Auth(user): Auth,
+    State(app): State<AppState>,
+    Path((ws, proj, svc)): Path<(String, String, String)>,
+    Json(req): Json<RestartReq>,
+) -> ApiResult<Json<DeploymentResp>> {
+    let (_, _) = require_workspace_role(&app, user.user_id, &ws).await?;
+    let (w, p, s) = resolve_wps(&app, &ws, &proj, &svc).await?;
+    let env_slug = req.env.as_deref().unwrap_or("production");
+    let e = environments::get_by_slug(&app.db, p.id, env_slug).await?;
+
+    if matches!(s.source, arx_core::model::ServiceSource::DbTemplate { .. }) {
+        return Err(ApiError::bad_request(
+            "restart on DB template not supported",
+        ));
+    }
+    let current = deployments::current_live(&app.db, s.id, e.id)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("service has no live deployment to restart"))?;
+    let image = current
+        .image_ref
+        .ok_or_else(|| ApiError::bad_request("live deployment has no image"))?;
+
+    let d = crate::deploy::deploy_docker_image(
+        &app,
+        crate::deploy::DeployContext {
+            workspace: &w,
+            project: &p,
+            service: &s,
+            environment: &e,
+            existing_dep_id: None,
+            image,
+            extra_env: vec![],
+            extra_mounts: vec![],
+        },
+    )
+    .await?;
+
+    let _ = arx_db::queries::audit::write(
+        &app.db,
+        Some(user.user_id),
+        "service.restart",
+        &format!("service:{}", s.slug),
+        serde_json::json!({"env": e.slug, "deployment": d.id.as_uuid().to_string()}),
     )
     .await;
 
