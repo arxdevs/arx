@@ -37,6 +37,19 @@ pub async fn create(
     })
 }
 
+pub async fn rename(pool: &SqlitePool, id: EnvironmentId, name: &str) -> Result<()> {
+    let res = sqlx::query("UPDATE environments SET name = ? WHERE id = ?")
+        .bind(name)
+        .bind(id.as_uuid().to_string())
+        .execute(pool)
+        .await
+        .map_err(map_sqlx)?;
+    if res.rows_affected() == 0 {
+        return Err(Error::NotFound);
+    }
+    Ok(())
+}
+
 pub async fn get_by_id(pool: &SqlitePool, id: EnvironmentId) -> Result<Environment> {
     let row = sqlx::query(
         "SELECT id, project_id, slug, name, is_default, created_at FROM environments WHERE id = ?",

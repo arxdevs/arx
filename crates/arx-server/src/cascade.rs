@@ -1,7 +1,7 @@
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 use arx_core::ids::{ProjectId, UserId, WorkspaceId};
-use arx_core::model::{Service, ServiceSource};
+use arx_core::model::{Environment, Service, ServiceSource};
 use arx_docker::{ContainerEngine, ContainerHandle};
 use sqlx::Row;
 use tracing::warn;
@@ -174,4 +174,92 @@ pub async fn delete_service_by_slug(
 ) -> ApiResult<()> {
     let s = arx_db::queries::services::get_by_slug(&app.db, project_id, service_slug).await?;
     delete_service(app, actor, &s, opts).await
+}
+
+pub async fn delete_environment(
+    app: &AppState,
+    actor: UserId,
+    env: &Environment,
+    opts: DeleteOpts,
+) -> ApiResult<()> {
+    if env.is_default {
+        return Err(ApiError::bad_request(
+            "cannot delete the default environment",
+        ));
+    }
+
+    let active: i64 = sqlx::query(
+        "SELECT COUNT(*) AS n FROM deployments WHERE environment_id = ? AND status = 'live'",
+    )
+    .bind(env.id.as_uuid().to_string())
+    .fetch_one(&app.db)
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?
+    .try_get("n")
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    if active > 0 && !opts.force {
+        return Err(ApiError::already_exists(format!(
+            "environment `{}` has {active} live deployment(s); use --force to cascade",
+            env.slug
+        )));
+    }
+
+    // Tear down every container that belongs to this environment.
+    let rows = sqlx::query(
+        "SELECT DISTINCT container_id FROM deployments
+         WHERE environment_id = ? AND container_id IS NOT NULL",
+    )
+    .bind(env.id.as_uuid().to_string())
+    .fetch_all(&app.db)
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    for row in rows {
+        if let Ok(Some(cid)) = row.try_get::<Option<String>, _>("container_id") {
+            let handle = ContainerHandle(cid);
+            if let Err(e) = app.docker.stop_and_remove(&handle).await {
+                warn!(error = %e, "failed to remove container during environment delete");
+            }
+        }
+    }
+
+    if opts.with_data {
+        let services = arx_db::queries::services::list_in_project(&app.db, env.project_id).await?;
+        for s in &services {
+            let name = crate::db_template::volume_name(s, env);
+            if let Err(e) = app.docker.remove_volume(&name).await {
+                warn!(error = %e, volume = %name, "failed to remove volume during environment delete");
+            }
+        }
+    }
+
+    // ON DELETE CASCADE removes this env's deployments, variables, domains, and configs.
+    sqlx::query("DELETE FROM environments WHERE id = ?")
+        .bind(env.id.as_uuid().to_string())
+        .execute(&app.db)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    crate::deploy::rewrite_traefik(app).await?;
+
+    let _ = arx_db::queries::audit::write(
+        &app.db,
+        Some(actor),
+        "environment.delete",
+        &format!("environment:{}", env.slug),
+        serde_json::json!({"force": opts.force, "with_data": opts.with_data}),
+    )
+    .await;
+
+    Ok(())
+}
+
+pub async fn delete_environment_by_slug(
+    app: &AppState,
+    actor: UserId,
+    project_id: ProjectId,
+    env_slug: &str,
+    opts: DeleteOpts,
+) -> ApiResult<()> {
+    let e = arx_db::queries::environments::get_by_slug(&app.db, project_id, env_slug).await?;
+    delete_environment(app, actor, &e, opts).await
 }

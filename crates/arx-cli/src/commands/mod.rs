@@ -1,6 +1,6 @@
 use crate::cli::{
-    BackupCmd, Cli, Command, ConfigCmd, DomainCmd, ProjectCmd, ServerCertCmd, ServerCmd,
-    ServerConfigCmd, ServiceCmd, VarCmd, VolumeCmd, WorkspaceCmd,
+    BackupCmd, Cli, Command, ConfigCmd, DomainCmd, EnvironmentCmd, ProjectCmd, ServerCertCmd,
+    ServerCmd, ServerConfigCmd, ServiceCmd, VarCmd, VolumeCmd, WorkspaceCmd,
 };
 use crate::client::{Client, print_value, push_delete_query};
 use crate::credentials::{CredentialEntry, remove_credential, save_credentials, upsert_credential};
@@ -187,6 +187,59 @@ pub(crate) async fn dispatch(
                 .await?
                 .unwrap_or(Value::Null);
             print_value(&v, cli.json);
+        }
+        Command::Environment(EnvironmentCmd::List) => {
+            let w = ws(cli.workspace.as_deref())?;
+            let p = pr(cli.project.as_deref())?;
+            let v = client
+                .request(
+                    reqwest::Method::GET,
+                    &format!("/v1/workspaces/{w}/projects/{p}/environments"),
+                    None,
+                )
+                .await?
+                .unwrap_or(Value::Null);
+            print_value(&v, cli.json);
+        }
+        Command::Environment(EnvironmentCmd::Create { slug, name }) => {
+            let w = ws(cli.workspace.as_deref())?;
+            let p = pr(cli.project.as_deref())?;
+            let v = client
+                .request(
+                    reqwest::Method::POST,
+                    &format!("/v1/workspaces/{w}/projects/{p}/environments"),
+                    Some(json!({"slug": slug, "name": name})),
+                )
+                .await?
+                .unwrap_or(Value::Null);
+            print_value(&v, cli.json);
+        }
+        Command::Environment(EnvironmentCmd::Rename { slug, name }) => {
+            let w = ws(cli.workspace.as_deref())?;
+            let p = pr(cli.project.as_deref())?;
+            let v = client
+                .request(
+                    reqwest::Method::PATCH,
+                    &format!("/v1/workspaces/{w}/projects/{p}/environments/{slug}"),
+                    Some(json!({ "name": name })),
+                )
+                .await?
+                .unwrap_or(Value::Null);
+            print_value(&v, cli.json);
+        }
+        Command::Environment(EnvironmentCmd::Delete {
+            slug,
+            force,
+            with_data,
+        }) => {
+            let w = ws(cli.workspace.as_deref())?;
+            let p = pr(cli.project.as_deref())?;
+            let mut path = format!("/v1/workspaces/{w}/projects/{p}/environments/{slug}");
+            push_delete_query(&mut path, force, with_data);
+            client.request(reqwest::Method::DELETE, &path, None).await?;
+            if !cli.quiet {
+                eprintln!("deleted environment {slug}");
+            }
         }
         Command::Service(ServiceCmd::List) => {
             let w = ws(cli.workspace.as_deref())?;
