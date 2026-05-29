@@ -47,17 +47,17 @@ pub async fn backup_now(app: &AppState, service: &Service) -> ApiResult<BackupRe
                 .arg(&db);
         }
         DbTemplate::Mysql => {
-            let user = "root";
             let db = db.clone().unwrap_or_else(|| "".to_string());
-            let mut args = vec!["mysqldump".to_string(), "-u".to_string(), user.to_string()];
+            // Pass the password via MYSQL_PWD env rather than -p<pw> so it does
+            // not leak into the container's process list.
             if let Some(p) = &password {
-                args.push(format!("-p{p}"));
+                cmd.arg("-e").arg(format!("MYSQL_PWD={p}"));
             }
-            args.push(db);
-            cmd.arg(&container);
-            for a in args {
-                cmd.arg(a);
-            }
+            cmd.arg(&container)
+                .arg("mysqldump")
+                .arg("-u")
+                .arg("root")
+                .arg(db);
         }
         DbTemplate::Mongodb => {
             cmd.arg(&container).arg("mongodump").arg("--archive");
@@ -182,14 +182,16 @@ pub async fn restore(app: &AppState, service: &Service, backup_uri: &str) -> Api
             cmd.arg(&container).arg("psql").arg("-U").arg(user).arg(db);
         }
         DbTemplate::Mysql => {
-            cmd.arg(&container).arg("sh").arg("-lc").arg(format!(
-                "mysql -u root {pwflag} {db}",
-                pwflag = password
-                    .as_ref()
-                    .map(|p| format!("-p{p}"))
-                    .unwrap_or_default(),
-                db = db.unwrap_or_default()
-            ));
+            // Pass the password via MYSQL_PWD env and the db name as a real
+            // argument rather than interpolating into a shell command: this
+            // hides the password and prevents shell injection via the db name.
+            if let Some(p) = &password {
+                cmd.arg("-e").arg(format!("MYSQL_PWD={p}"));
+            }
+            cmd.arg(&container).arg("mysql").arg("-u").arg("root");
+            if let Some(db) = db {
+                cmd.arg(db);
+            }
         }
         DbTemplate::Mongodb => {
             cmd.arg(&container)
