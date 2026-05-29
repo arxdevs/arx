@@ -485,20 +485,45 @@ pub(crate) async fn deploy_docker_image(
     let swap_lock = app.deploy_lock(service_id, environment_id);
     let _guard = swap_lock.lock().await;
 
-    deployments::update_status(
-        &app.db,
-        dep_id,
-        DeploymentStatus::Live,
-        Some(handle.as_str()),
-        None,
-        false,
-    )
-    .await?;
-    let prev_containers =
-        deployments::supersede_previous(&app.db, service_id, environment_id, dep_id).await?;
-    svc_q::set_current_deployment(&app.db, service_id, environment_id, dep_id).await?;
+    // Mark live, supersede the previous deployment, and swing traefik over.
+    // If any step fails the new container is already running but unreachable,
+    // so tear it down instead of leaking it (the previous version keeps serving).
+    let swap: ApiResult<Vec<String>> = async {
+        deployments::update_status(
+            &app.db,
+            dep_id,
+            DeploymentStatus::Live,
+            Some(handle.as_str()),
+            None,
+            false,
+        )
+        .await?;
+        let prev =
+            deployments::supersede_previous(&app.db, service_id, environment_id, dep_id).await?;
+        svc_q::set_current_deployment(&app.db, service_id, environment_id, dep_id).await?;
+        rewrite_traefik(app).await?;
+        Ok(prev)
+    }
+    .await;
 
-    rewrite_traefik(app).await?;
+    let prev_containers = match swap {
+        Ok(prev) => prev,
+        Err(e) => {
+            warn!(error = ?e, "deployment swap failed; tearing down new container");
+            let _ = app.docker.stop_and_remove(&handle).await;
+            let _ = deployments::update_status(
+                &app.db,
+                dep_id,
+                DeploymentStatus::Failed,
+                Some(handle.as_str()),
+                Some("deployment swap failed"),
+                true,
+            )
+            .await;
+            drop(_guard);
+            return Err(e);
+        }
+    };
     drop(_guard);
 
     for c in prev_containers {
