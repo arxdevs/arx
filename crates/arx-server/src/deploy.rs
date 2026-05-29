@@ -280,6 +280,15 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
+fn restart_policy_from(s: &str) -> RestartPolicy {
+    match s {
+        "no" => RestartPolicy::No,
+        "always" => RestartPolicy::Always,
+        "on-failure" => RestartPolicy::OnFailure,
+        _ => RestartPolicy::UnlessStopped,
+    }
+}
+
 pub(crate) async fn deploy_docker_image(
     app: &AppState,
     ctx: DeployContext<'_>,
@@ -426,7 +435,7 @@ pub(crate) async fn deploy_docker_image(
         }],
         mounts: extra_mounts,
         resources,
-        restart: RestartPolicy::UnlessStopped,
+        restart: restart_policy_from(&ctx.service.restart_policy),
         network: Some(network_name.clone()),
         network_aliases: vec![alias.clone(), hostname.clone()],
         labels,

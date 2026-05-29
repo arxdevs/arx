@@ -5,8 +5,7 @@ use arx_core::{Error, Result};
 use chrono::{DateTime, Utc};
 use sqlx::{Row, SqlitePool};
 
-const SELECT_COLS: &str =
-    "id, project_id, slug, name, kind, source, build_command, start_command, created_at";
+const SELECT_COLS: &str = "id, project_id, slug, name, kind, source, build_command, start_command, restart_policy, created_at";
 
 /// `Some(Some(s))` = set; `Some(None)` = clear; `None` = leave unchanged.
 #[derive(Debug, Clone, Default)]
@@ -14,11 +13,15 @@ pub struct ServicePatch {
     pub name: Option<String>,
     pub build_command: Option<Option<String>>,
     pub start_command: Option<Option<String>>,
+    pub restart_policy: Option<String>,
 }
 
 impl ServicePatch {
     pub fn is_empty(&self) -> bool {
-        self.name.is_none() && self.build_command.is_none() && self.start_command.is_none()
+        self.name.is_none()
+            && self.build_command.is_none()
+            && self.start_command.is_none()
+            && self.restart_policy.is_none()
     }
 }
 
@@ -92,6 +95,7 @@ pub async fn create(
         source: source.clone(),
         build_command: build_command.map(String::from),
         start_command: start_command.map(String::from),
+        restart_policy: "unless-stopped".into(),
         created_at: now,
     })
 }
@@ -154,6 +158,9 @@ pub async fn update(pool: &SqlitePool, id: ServiceId, patch: &ServicePatch) -> R
     if patch.start_command.is_some() {
         sets.push("start_command = ?");
     }
+    if patch.restart_policy.is_some() {
+        sets.push("restart_policy = ?");
+    }
     let sql = format!("UPDATE services SET {} WHERE id = ?", sets.join(", "));
     let mut q = sqlx::query(&sql);
     if let Some(name) = &patch.name {
@@ -164,6 +171,9 @@ pub async fn update(pool: &SqlitePool, id: ServiceId, patch: &ServicePatch) -> R
     }
     if let Some(sc) = &patch.start_command {
         q = q.bind(sc.as_deref());
+    }
+    if let Some(rp) = &patch.restart_policy {
+        q = q.bind(rp);
     }
     q.bind(id.as_uuid().to_string())
         .execute(pool)
@@ -274,6 +284,7 @@ fn parse(row: &sqlx::sqlite::SqliteRow) -> Result<Service> {
     let source_json: String = row.try_get("source").map_err(map_sqlx)?;
     let build_command: Option<String> = row.try_get("build_command").map_err(map_sqlx)?;
     let start_command: Option<String> = row.try_get("start_command").map_err(map_sqlx)?;
+    let restart_policy: String = row.try_get("restart_policy").map_err(map_sqlx)?;
     let created: String = row.try_get("created_at").map_err(map_sqlx)?;
     let kind = match kind_str.as_str() {
         "git_source" => ServiceKind::GitSource,
@@ -292,6 +303,7 @@ fn parse(row: &sqlx::sqlite::SqliteRow) -> Result<Service> {
         source,
         build_command,
         start_command,
+        restart_policy,
         created_at: DateTime::parse_from_rfc3339(&created)
             .map_err(|e| Error::Internal(e.to_string()))?
             .with_timezone(&Utc),

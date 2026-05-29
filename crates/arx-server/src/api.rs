@@ -620,6 +620,7 @@ struct ServiceResp {
     source: ServiceSource,
     build_command: Option<String>,
     start_command: Option<String>,
+    restart_policy: String,
 }
 
 impl From<arx_core::model::Service> for ServiceResp {
@@ -632,6 +633,7 @@ impl From<arx_core::model::Service> for ServiceResp {
             source: s.source,
             build_command: s.build_command,
             start_command: s.start_command,
+            restart_policy: s.restart_policy,
         }
     }
 }
@@ -677,6 +679,8 @@ struct PatchServiceReq {
     build_command: Option<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_some")]
     start_command: Option<Option<String>>,
+    #[serde(default)]
+    restart_policy: Option<String>,
 }
 
 fn deserialize_some<'de, T, D>(de: D) -> Result<Option<Option<T>>, D::Error>
@@ -696,10 +700,19 @@ async fn rename_service(
     let (ws_id, _) = require_workspace_role(&app, user.user_id, &ws).await?;
     let p = projects::get_by_slug(&app.db, ws_id, &proj).await?;
     let s = services::get_by_slug(&app.db, p.id, &svc).await?;
+    if let Some(rp) = &req.restart_policy {
+        if !matches!(
+            rp.as_str(),
+            "no" | "unless-stopped" | "always" | "on-failure"
+        ) {
+            return Err(ApiError::bad_request("invalid restart policy"));
+        }
+    }
     let patch = arx_db::queries::services::ServicePatch {
         name: req.name,
         build_command: req.build_command,
         start_command: req.start_command,
+        restart_policy: req.restart_policy,
     };
     services::update(&app.db, s.id, &patch).await?;
     let updated = services::get_by_id(&app.db, s.id).await?;
