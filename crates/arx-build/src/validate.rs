@@ -393,6 +393,32 @@ pub fn validate_sha_hex(s: &str) -> Result<&str, BuildError> {
     Ok(s)
 }
 
+const MAX_ENV_NAME_LEN: usize = 256;
+
+fn env_name_re() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").unwrap())
+}
+
+/// A service variable name that is safe to use as a shell/environment
+/// identifier when sourced into a build (`export NAME=...`). Names that don't
+/// match are skipped from build-time injection — they can't be valid env vars.
+pub fn validate_env_name(s: &str) -> Result<&str, BuildError> {
+    if s.is_empty() || s.len() > MAX_ENV_NAME_LEN {
+        return Err(BuildError::InvalidInput {
+            field: "env_name",
+            reason: "length must be 1..=256".into(),
+        });
+    }
+    if !env_name_re().is_match(s) {
+        return Err(BuildError::InvalidInput {
+            field: "env_name",
+            reason: "must match [A-Za-z_][A-Za-z0-9_]*".into(),
+        });
+    }
+    Ok(s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,5 +550,15 @@ mod tests {
         assert!(validate_hostname("evil`Host(`bad.com`)`").is_err());
         assert!(validate_hostname(&"a".repeat(64)).is_err());
         assert!(validate_hostname(&format!("{}.com", "a".repeat(250))).is_err());
+    }
+
+    #[test]
+    fn env_name_accepts_identifiers_rejects_others() {
+        assert!(validate_env_name("DATABASE_URL").is_ok());
+        assert!(validate_env_name("_X1").is_ok());
+        assert!(validate_env_name("1ABC").is_err()); // leading digit
+        assert!(validate_env_name("BAD-NAME").is_err()); // hyphen
+        assert!(validate_env_name("HAS SPACE").is_err());
+        assert!(validate_env_name("").is_err());
     }
 }

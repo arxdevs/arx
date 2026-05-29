@@ -31,6 +31,7 @@ impl StackBuilder for Maven {
         let start_raw = ov.start_command.unwrap_or(default_start);
 
         let build_quoted = validate::shell_single_quote(build_raw, "build_command")?;
+        let build_run = crate::stack::build_run_with_env(&build_quoted);
         let start_json = validate::cmd_to_json_token(start_raw, "start_command")?;
         let jdk = self.jdk;
 
@@ -39,7 +40,7 @@ impl StackBuilder for Maven {
              FROM maven:3-eclipse-temurin-{jdk} AS build\n\
              WORKDIR /app\n\
              COPY . .\n\
-             RUN sh -c '{build_quoted}'\n\
+             {build_run}\n\
              \n\
              FROM eclipse-temurin:{jdk}-jre\n\
              WORKDIR /app\n\

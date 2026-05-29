@@ -31,6 +31,7 @@ impl StackBuilder for Go {
         let start_raw = ov.start_command.unwrap_or(default_start);
 
         let build_quoted = validate::shell_single_quote(build_raw, "build_command")?;
+        let build_run = crate::stack::build_run_with_env(&build_quoted);
         let start_json = validate::cmd_to_json_token(start_raw, "start_command")?;
         let go = format!("1.{}", self.go_minor);
 
@@ -39,7 +40,7 @@ impl StackBuilder for Go {
              FROM golang:{go}-bookworm AS build\n\
              WORKDIR /src\n\
              COPY . .\n\
-             RUN sh -c '{build_quoted}'\n\
+             {build_run}\n\
              \n\
              FROM debian:bookworm-slim\n\
              RUN apt-get update \\\n\

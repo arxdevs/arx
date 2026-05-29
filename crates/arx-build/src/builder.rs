@@ -7,6 +7,8 @@ use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+use sha2::{Digest, Sha256};
+
 pub struct BuildInput {
     pub source_dir: PathBuf,
     pub image_tag: String,
@@ -14,6 +16,10 @@ pub struct BuildInput {
     pub root_directory: Option<PathBuf>,
     pub build_command: Option<String>,
     pub start_command: Option<String>,
+    /// Resolved service variables, available at build time (Railway parity).
+    /// Injected as a single BuildKit secret (`arx_env`) — never as `--build-arg`
+    /// — so values never leak into image history/layers.
+    pub build_env: Vec<(String, String)>,
 }
 
 pub struct BuildOutput {
@@ -47,6 +53,8 @@ pub async fn build(input: &BuildInput) -> Result<BuildOutput> {
         None => package_dir.clone(),
     };
 
+    let prepared = prepare_build_env(&input.build_env);
+
     // The explicit Dockerfile path is resolved against the package directory —
     // a Dockerfile lives with its app, regardless of monorepo layout.
     let explicit_dockerfile = match input.dockerfile.clone() {
@@ -58,7 +66,7 @@ pub async fn build(input: &BuildInput) -> Result<BuildOutput> {
     };
 
     if let Some(dockerfile) = explicit_dockerfile {
-        docker_build_file(&context, &dockerfile, &input.image_tag).await?;
+        docker_build_file(&context, &dockerfile, &input.image_tag, &prepared).await?;
         return Ok(BuildOutput {
             image_ref: input.image_tag.clone(),
             used: BuilderKind::Dockerfile,
@@ -94,7 +102,7 @@ pub async fn build(input: &BuildInput) -> Result<BuildOutput> {
         );
     }
 
-    docker_build_stdin(&context, &dockerfile_text, &input.image_tag).await?;
+    docker_build_stdin(&context, &dockerfile_text, &input.image_tag, &prepared).await?;
 
     Ok(BuildOutput {
         image_ref: input.image_tag.clone(),
@@ -138,12 +146,81 @@ fn contained(root: &Path, candidate: &Path, label: &str) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-async fn docker_build_file(context: &Path, dockerfile: &Path, tag: &str) -> Result<()> {
-    let status = Command::new("docker")
-        .args(["build", "-t", tag, "-f"])
+/// Service variables prepared for build-time injection. The payload is a set of
+/// shell-safe `export NAME='value'` lines delivered as a single BuildKit secret;
+/// the hash is a non-secret digest passed as a build-arg to bust the layer cache
+/// when any value changes.
+struct PreparedEnv {
+    secret_payload: Option<String>,
+    hash: Option<String>,
+}
+
+fn prepare_build_env(vars: &[(String, String)]) -> PreparedEnv {
+    let mut payload = String::new();
+    for (k, v) in vars {
+        if crate::validate::validate_env_name(k).is_err() {
+            tracing::warn!(key = %k, "skipping build env var: invalid name");
+            continue;
+        }
+        // single-quote escaping makes the value inert when sourced — `;`, `$(...)`
+        // and other shell metacharacters cannot execute. Rejects newline/NUL.
+        let escaped = match crate::validate::shell_single_quote(v, "build_env_value") {
+            Ok(s) => s,
+            Err(_) => {
+                tracing::warn!(key = %k, "skipping build env var: value rejected");
+                continue;
+            }
+        };
+        payload.push_str("export ");
+        payload.push_str(k);
+        payload.push_str("='");
+        payload.push_str(&escaped);
+        payload.push_str("'\n");
+    }
+    if payload.is_empty() {
+        return PreparedEnv {
+            secret_payload: None,
+            hash: None,
+        };
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(payload.as_bytes());
+    let hash = format!("{:x}", hasher.finalize());
+    PreparedEnv {
+        secret_payload: Some(payload),
+        hash: Some(hash),
+    }
+}
+
+/// Enable BuildKit (for `--secret`/`--mount=type=secret`) and attach the service
+/// env secret + cache-busting build-arg. NOTE: this uses Docker's built-in
+/// BuildKit frontend — it is NOT the in-container build agent (railpack/nixpacks)
+/// that AGENTS.md forbids reintroducing.
+fn apply_build_env(cmd: &mut Command, env: &PreparedEnv) {
+    cmd.env("DOCKER_BUILDKIT", "1");
+    if let Some(h) = &env.hash {
+        cmd.arg("--build-arg").arg(format!("ARX_ENV_HASH={h}"));
+    }
+    if let Some(p) = &env.secret_payload {
+        cmd.env("ARX_ENV_SECRET", p);
+        cmd.arg("--secret").arg("id=arx_env,env=ARX_ENV_SECRET");
+    }
+}
+
+async fn docker_build_file(
+    context: &Path,
+    dockerfile: &Path,
+    tag: &str,
+    env: &PreparedEnv,
+) -> Result<()> {
+    let mut cmd = Command::new("docker");
+    cmd.arg("build").arg("-t").arg(tag);
+    apply_build_env(&mut cmd, env);
+    cmd.arg("-f")
         .arg(dockerfile)
         .arg(context)
-        .stdin(Stdio::null())
+        .stdin(Stdio::null());
+    let status = cmd
         .status()
         .await
         .map_err(|e| Error::Internal(format!("docker build spawn: {e}")))?;
@@ -157,11 +234,17 @@ async fn docker_build_file(context: &Path, dockerfile: &Path, tag: &str) -> Resu
 }
 
 /// Avoids writing a Dockerfile into the user's repo by piping through `-f -`.
-async fn docker_build_stdin(context: &Path, dockerfile: &str, tag: &str) -> Result<()> {
-    let mut child = Command::new("docker")
-        .args(["build", "-t", tag, "-f", "-"])
-        .arg(context)
-        .stdin(Stdio::piped())
+async fn docker_build_stdin(
+    context: &Path,
+    dockerfile: &str,
+    tag: &str,
+    env: &PreparedEnv,
+) -> Result<()> {
+    let mut cmd = Command::new("docker");
+    cmd.arg("build").arg("-t").arg(tag);
+    apply_build_env(&mut cmd, env);
+    cmd.arg("-f").arg("-").arg(context).stdin(Stdio::piped());
+    let mut child = cmd
         .spawn()
         .map_err(|e| Error::Internal(format!("docker build spawn: {e}")))?;
 
@@ -195,6 +278,30 @@ mod tests {
     use crate::stack::CommandOverrides;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn prepare_build_env_escapes_skips_and_hashes() {
+        let p = prepare_build_env(&[
+            ("A".into(), "b; rm -rf /".into()),
+            ("Q".into(), "a'b".into()),
+            ("BAD-NAME".into(), "x".into()),
+        ]);
+        let payload = p.secret_payload.expect("payload");
+        // shell metacharacters are inert inside single quotes
+        assert!(payload.contains("export A='b; rm -rf /'"));
+        // single quote in value is escaped as '\''
+        assert!(payload.contains(r"export Q='a'\''b'"));
+        // invalid identifier is skipped
+        assert!(!payload.contains("BAD-NAME"));
+        assert!(p.hash.is_some());
+    }
+
+    #[test]
+    fn prepare_build_env_empty_is_none() {
+        let p = prepare_build_env(&[]);
+        assert!(p.secret_payload.is_none());
+        assert!(p.hash.is_none());
+    }
 
     #[test]
     fn workspace_aware_node_dockerfile_for_pnpm_monorepo() {

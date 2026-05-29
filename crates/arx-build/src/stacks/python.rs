@@ -75,6 +75,7 @@ impl StackBuilder for Python {
 
         let build_raw = ov.build_command.unwrap_or(default_build);
         let build_quoted = validate::shell_single_quote(build_raw, "build_command")?;
+        let build_run = crate::stack::build_run_with_env(&build_quoted);
         let start_json = validate::cmd_to_json_token(start_raw, "start_command")?;
         let py = format!("{}.{}", self.py_major, self.py_minor);
 
@@ -83,7 +84,7 @@ impl StackBuilder for Python {
              FROM python:{py}-slim\n\
              WORKDIR /app\n\
              COPY . .\n\
-             RUN sh -c '{build_quoted}'\n\
+             {build_run}\n\
              ENV PORT=8080\n\
              EXPOSE 8080\n\
              CMD [\"sh\",\"-c\",{start_json}]\n"

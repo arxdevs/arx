@@ -161,11 +161,20 @@ async fn deploy_git_source(
         .ok_or_else(|| ApiError::internal("empty git sha"))?;
     validate::validate_sha_hex(sha_short).map_err(|e| ApiError::internal(e.to_string()))?;
 
+    // Resolve service variables before the build so they are available at build
+    // time (Railway parity). The same set is re-resolved for the container at
+    // runtime in deploy_docker_image. Sorted for a deterministic config hash.
+    let mut build_env =
+        crate::var_resolve::resolve_for_injection(app, project.id, service.id, environment.id)
+            .await?;
+    build_env.sort();
+
     let config_hash = compute_config_hash(
         service.build_command.as_deref(),
         service.start_command.as_deref(),
         dockerfile,
         root_directory,
+        &build_env,
     );
     let image_tag = format!(
         "arx-svc-{}:{}-{}",
@@ -181,6 +190,7 @@ async fn deploy_git_source(
         root_directory: root_directory.map(std::path::PathBuf::from),
         build_command: service.build_command.clone(),
         start_command: service.start_command.clone(),
+        build_env,
     })
     .await
     .map_err(|e| match e {
@@ -211,11 +221,21 @@ fn compute_config_hash(
     start_cmd: Option<&str>,
     dockerfile: Option<&str>,
     root_directory: Option<&str>,
+    build_env: &[(String, String)],
 ) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     for part in [build_cmd, start_cmd, dockerfile, root_directory] {
         h.update(part.unwrap_or("").as_bytes());
+        h.update([0u8]);
+    }
+    // Build-time env is part of the build identity: a changed variable must
+    // produce a new image tag (and, via the build-arg digest, bust the layer
+    // cache). `build_env` is sorted by the caller for a stable hash.
+    for (k, v) in build_env {
+        h.update(k.as_bytes());
+        h.update([b'=']);
+        h.update(v.as_bytes());
         h.update([0u8]);
     }
     hex_of(&h.finalize())
