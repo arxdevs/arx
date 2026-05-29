@@ -99,3 +99,104 @@ pub async fn get_app(pool: &SqlitePool, key: &MasterKey) -> Result<Option<AppCre
         html_url: row.try_get("html_url").map_err(map_sqlx)?,
     }))
 }
+
+/// Records a received webhook event. Idempotent on `(source, delivery_id)`:
+/// a GitHub redelivery carrying the same `X-GitHub-Delivery` is silently
+/// ignored rather than erroring.
+///
+/// The `ON CONFLICT` target repeats the partial-index predicate
+/// (`WHERE delivery_id IS NOT NULL`) on purpose. `webhook_events_delivery_idx`
+/// is a partial unique index, and SQLite only resolves an upsert to a partial
+/// index when the conflict target carries the same predicate; omitting it makes
+/// the statement fail at runtime with "ON CONFLICT clause does not match any
+/// PRIMARY KEY or UNIQUE constraint".
+pub async fn record_event(
+    pool: &SqlitePool,
+    id: &str,
+    event_type: &str,
+    delivery_id: Option<&str>,
+    payload: &str,
+    received_at: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO webhook_events (id, source, event_type, delivery_id, payload, processed, error, received_at, processed_at)
+         VALUES (?, 'github', ?, ?, ?, 0, NULL, ?, NULL)
+         ON CONFLICT (source, delivery_id) WHERE delivery_id IS NOT NULL DO NOTHING",
+    )
+    .bind(id)
+    .bind(event_type)
+    .bind(delivery_id)
+    .bind(payload)
+    .bind(received_at)
+    .execute(pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pool::connect;
+
+    async fn test_pool() -> SqlitePool {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Leak the TempDir so the file outlives the pool for the test duration.
+        let dir = Box::leak(Box::new(tmp));
+        connect(&dir.path().join("test.db")).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn record_event_dedupes_redelivery() {
+        let pool = test_pool().await;
+        record_event(
+            &pool,
+            "id-1",
+            "push",
+            Some("dlv-1"),
+            "{}",
+            "2026-01-01T00:00:00Z",
+        )
+        .await
+        .expect("first insert should succeed against the partial index");
+        // Same delivery id arriving again must be a silent no-op, not an error.
+        record_event(
+            &pool,
+            "id-2",
+            "push",
+            Some("dlv-1"),
+            "{}",
+            "2026-01-01T00:00:01Z",
+        )
+        .await
+        .expect("redelivery should not error");
+
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM webhook_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            n, 1,
+            "redelivery with same delivery_id must be deduplicated"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_event_keeps_null_delivery_rows() {
+        let pool = test_pool().await;
+        // Rows with NULL delivery_id fall outside the partial index, so they
+        // are never deduplicated even when otherwise identical.
+        record_event(&pool, "id-1", "ping", None, "{}", "2026-01-01T00:00:00Z")
+            .await
+            .unwrap();
+        record_event(&pool, "id-2", "ping", None, "{}", "2026-01-01T00:00:01Z")
+            .await
+            .unwrap();
+
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM webhook_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 2);
+    }
+}

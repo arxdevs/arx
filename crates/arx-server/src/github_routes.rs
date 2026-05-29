@@ -200,17 +200,14 @@ async fn webhook(
 
     let id = uuid::Uuid::now_v7();
     let now = chrono::Utc::now().to_rfc3339();
-    sqlx::query(
-        "INSERT INTO webhook_events (id, source, event_type, delivery_id, payload, processed, error, received_at, processed_at)
-         VALUES (?, 'github', ?, ?, ?, 0, NULL, ?, NULL)
-         ON CONFLICT (source, delivery_id) DO NOTHING",
+    gh_q::record_event(
+        &app.db,
+        &id.to_string(),
+        &event,
+        delivery.as_deref(),
+        &String::from_utf8_lossy(&body),
+        &now,
     )
-    .bind(id.to_string())
-    .bind(&event)
-    .bind(delivery)
-    .bind(String::from_utf8_lossy(&body).into_owned())
-    .bind(&now)
-    .execute(&app.db)
     .await
     .map_err(|e| ApiError::internal(e.to_string()))?;
 
