@@ -61,3 +61,29 @@ pub async fn reconcile_installations(app: &AppState) -> ApiResult<SyncReport> {
         repos: total_repos,
     })
 }
+
+/// Mints a short-lived installation access token for cloning `repo_full_name`,
+/// if some installation is known to reach it.
+///
+/// Returns `Ok(None)` when no installation maps to the repo (e.g. a public repo,
+/// or installations not synced yet) so the caller falls back to an
+/// unauthenticated clone. Returns `Err` only when an installation *is* mapped
+/// but the App is unconfigured or the token mint fails — surfacing that beats a
+/// confusing downstream clone error.
+pub async fn clone_token_for_repo(
+    app: &AppState,
+    repo_full_name: &str,
+) -> ApiResult<Option<String>> {
+    let Some(installation_id) = gh_q::installation_for_repo(&app.db, repo_full_name).await? else {
+        return Ok(None);
+    };
+    let creds = gh_q::get_app(&app.db, &app.master_key)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("github app not configured"))?;
+    let jwt = arx_github::app_jwt(creds.app_id, &creds.private_key_pem)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let token = arx_github::api::installation_token(&app.http, &jwt, installation_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Some(token.token))
+}
