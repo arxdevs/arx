@@ -48,6 +48,12 @@ pub fn router(state: AppState) -> Router {
             get(list_environments).post(create_environment),
         )
         .route(
+            "/v1/workspaces/:ws/projects/:proj/environments/:env",
+            get(get_environment)
+                .patch(rename_environment)
+                .delete(delete_environment_handler),
+        )
+        .route(
             "/v1/workspaces/:ws/projects/:proj/services",
             get(list_services).post(create_service),
         )
@@ -531,6 +537,67 @@ async fn create_environment(
         name: e.name,
         is_default: e.is_default,
     }))
+}
+
+async fn get_environment(
+    Auth(user): Auth,
+    State(app): State<AppState>,
+    Path((ws, proj, env)): Path<(String, String, String)>,
+) -> ApiResult<Json<EnvResp>> {
+    let (ws_id, _) = require_workspace_role(&app, user.user_id, &ws).await?;
+    let p = projects::get_by_slug(&app.db, ws_id, &proj).await?;
+    let e = environments::get_by_slug(&app.db, p.id, &env).await?;
+    Ok(Json(EnvResp {
+        id: e.id.as_uuid().to_string(),
+        slug: e.slug,
+        name: e.name,
+        is_default: e.is_default,
+    }))
+}
+
+#[derive(Deserialize)]
+struct PatchEnvReq {
+    name: String,
+}
+
+async fn rename_environment(
+    Auth(user): Auth,
+    State(app): State<AppState>,
+    Path((ws, proj, env)): Path<(String, String, String)>,
+    Json(req): Json<PatchEnvReq>,
+) -> ApiResult<Json<EnvResp>> {
+    let (ws_id, _) = require_workspace_role(&app, user.user_id, &ws).await?;
+    let p = projects::get_by_slug(&app.db, ws_id, &proj).await?;
+    let e = environments::get_by_slug(&app.db, p.id, &env).await?;
+    environments::rename(&app.db, e.id, &req.name).await?;
+    Ok(Json(EnvResp {
+        id: e.id.as_uuid().to_string(),
+        slug: e.slug,
+        name: req.name,
+        is_default: e.is_default,
+    }))
+}
+
+async fn delete_environment_handler(
+    Auth(user): Auth,
+    State(app): State<AppState>,
+    Path((ws, proj, env)): Path<(String, String, String)>,
+    axum::extract::Query(q): axum::extract::Query<DeleteQuery>,
+) -> ApiResult<()> {
+    let (ws_id, _) = require_workspace_role(&app, user.user_id, &ws).await?;
+    let p = projects::get_by_slug(&app.db, ws_id, &proj).await?;
+    crate::cascade::delete_environment_by_slug(
+        &app,
+        user.user_id,
+        p.id,
+        &env,
+        crate::cascade::DeleteOpts {
+            force: q.force,
+            with_data: q.with_data,
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 #[derive(Deserialize)]

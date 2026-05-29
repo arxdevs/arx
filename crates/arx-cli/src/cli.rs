@@ -80,6 +80,9 @@ pub(crate) enum Command {
     Project(ProjectCmd),
 
     #[command(subcommand)]
+    Environment(EnvironmentCmd),
+
+    #[command(subcommand)]
     Service(ServiceCmd),
 
     #[command(subcommand)]
@@ -258,6 +261,29 @@ pub(crate) enum ProjectCmd {
         #[arg(long)]
         force: bool,
         /// Also remove docker named volumes and backup files for every affected service.
+        #[arg(long)]
+        with_data: bool,
+    },
+    Rename {
+        slug: String,
+        name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum EnvironmentCmd {
+    List,
+    Create {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        name: String,
+    },
+    Delete {
+        slug: String,
+        #[arg(long)]
+        force: bool,
+        /// Also remove docker named volumes for this environment.
         #[arg(long)]
         with_data: bool,
     },
