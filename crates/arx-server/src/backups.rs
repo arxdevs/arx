@@ -67,44 +67,58 @@ pub async fn backup_now(app: &AppState, service: &Service) -> ApiResult<BackupRe
         }
     }
 
-    if matches!(template, DbTemplate::Redis) {
-        let status = Command::new("docker")
-            .args(["exec", &container, "redis-cli", "save"])
-            .status()
-            .await
-            .map_err(|e| ApiError::internal(e.to_string()))?;
-        if !status.success() {
-            return Err(ApiError::internal("redis save failed"));
+    let dump_result: ApiResult<()> = async {
+        if matches!(template, DbTemplate::Redis) {
+            let status = Command::new("docker")
+                .args(["exec", &container, "redis-cli", "save"])
+                .status()
+                .await
+                .map_err(|e| ApiError::internal(e.to_string()))?;
+            if !status.success() {
+                return Err(ApiError::internal("redis save failed"));
+            }
+            let cp_status = Command::new("docker")
+                .arg("cp")
+                .arg(format!("{container}:/data/dump.rdb"))
+                .arg(&path)
+                .status()
+                .await
+                .map_err(|e| ApiError::internal(e.to_string()))?;
+            if !cp_status.success() {
+                return Err(ApiError::internal("docker cp failed"));
+            }
+        } else {
+            cmd.stdout(Stdio::from(outfile));
+            cmd.stdin(Stdio::null());
+            let status = cmd
+                .status()
+                .await
+                .map_err(|e| ApiError::internal(e.to_string()))?;
+            if !status.success() {
+                return Err(ApiError::internal(format!(
+                    "{:?} failed: exit {}",
+                    template,
+                    status.code().unwrap_or(-1)
+                )));
+            }
         }
-        let cp_status = Command::new("docker")
-            .arg("cp")
-            .arg(format!("{container}:/data/dump.rdb"))
-            .arg(&path)
-            .status()
-            .await
-            .map_err(|e| ApiError::internal(e.to_string()))?;
-        if !cp_status.success() {
-            return Err(ApiError::internal("docker cp failed"));
-        }
-    } else {
-        cmd.stdout(Stdio::from(outfile));
-        cmd.stdin(Stdio::null());
-        let status = cmd
-            .status()
-            .await
-            .map_err(|e| ApiError::internal(e.to_string()))?;
-        if !status.success() {
-            return Err(ApiError::internal(format!(
-                "{:?} failed: exit {}",
-                template,
-                status.code().unwrap_or(-1)
-            )));
-        }
+        Ok(())
+    }
+    .await;
+
+    // On any failure, drop the partial/empty dump file we created before recording it.
+    if let Err(e) = dump_result {
+        let _ = std::fs::remove_file(&path);
+        return Err(e);
     }
 
     let size = std::fs::metadata(&path)
         .map(|m| m.len() as i64)
         .unwrap_or(0);
+    if size == 0 {
+        let _ = std::fs::remove_file(&path);
+        return Err(ApiError::internal("backup produced no data"));
+    }
     let storage_uri = format!("file://{}", path.display());
     let id = arx_db::queries::backups::record(&app.db, service.id, size, &storage_uri).await?;
 
