@@ -624,6 +624,7 @@ struct ServiceResp {
     source: ServiceSource,
     build_command: Option<String>,
     start_command: Option<String>,
+    pre_deploy_command: Option<String>,
     restart_policy: String,
 }
 
@@ -637,6 +638,7 @@ impl From<arx_core::model::Service> for ServiceResp {
             source: s.source,
             build_command: s.build_command,
             start_command: s.start_command,
+            pre_deploy_command: s.pre_deploy_command,
             restart_policy: s.restart_policy,
         }
     }
@@ -683,6 +685,8 @@ struct PatchServiceReq {
     build_command: Option<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_some")]
     start_command: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pre_deploy_command: Option<Option<String>>,
     #[serde(default)]
     restart_policy: Option<String>,
 }
@@ -716,6 +720,7 @@ async fn rename_service(
         name: req.name,
         build_command: req.build_command,
         start_command: req.start_command,
+        pre_deploy_command: req.pre_deploy_command,
         restart_policy: req.restart_policy,
     };
     services::update(&app.db, s.id, &patch).await?;

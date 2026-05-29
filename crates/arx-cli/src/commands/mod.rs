@@ -377,6 +377,7 @@ pub(crate) async fn dispatch(
                 slug,
                 build_command,
                 start_command,
+                pre_deploy_command,
                 restart_policy,
             } => {
                 let w = ws(cli.workspace.as_deref())?;
@@ -402,12 +403,22 @@ pub(crate) async fn dispatch(
                         },
                     );
                 }
+                if let Some(pd) = pre_deploy_command {
+                    body.insert(
+                        "pre_deploy_command".into(),
+                        if pd.is_empty() {
+                            Value::Null
+                        } else {
+                            Value::String(pd)
+                        },
+                    );
+                }
                 if let Some(rp) = restart_policy {
                     body.insert("restart_policy".into(), Value::String(rp));
                 }
                 if body.is_empty() {
                     return Err(CliError::Usage(
-                        "specify at least one of --build-cmd / --start-cmd / --restart-policy"
+                        "specify at least one of --build-cmd / --start-cmd / --pre-deploy-cmd / --restart-policy"
                             .into(),
                     )
                     .into());

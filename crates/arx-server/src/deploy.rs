@@ -425,6 +425,62 @@ pub(crate) async fn deploy_docker_image(
     labels.insert("arx.service".to_string(), service_slug.clone());
     labels.insert("arx.environment".to_string(), env_slug.clone());
 
+    // Run the pre-deploy command (e.g. DB migrations) in a throwaway container
+    // sharing the new image/env/network, before the real container goes live.
+    if let Some(pre_cmd) = ctx
+        .service
+        .pre_deploy_command
+        .as_deref()
+        .filter(|c| !c.is_empty())
+    {
+        tracing::info!(deployment_id = %dep_id.as_uuid(), "running pre-deploy command");
+        let mut cmd = tokio::process::Command::new("docker");
+        cmd.arg("run")
+            .arg("--rm")
+            .arg("--network")
+            .arg(&network_name);
+        for (k, v) in &injected {
+            cmd.arg("-e").arg(format!("{k}={v}"));
+        }
+        cmd.arg(&image).arg("sh").arg("-lc").arg(pre_cmd);
+        let result = cmd.output().await;
+        let output = match result {
+            Ok(o) => o,
+            Err(e) => {
+                let msg = format!("pre-deploy command: {e}");
+                let _ = deployments::update_status(
+                    &app.db,
+                    dep_id,
+                    DeploymentStatus::Failed,
+                    None,
+                    Some(&msg),
+                    true,
+                )
+                .await;
+                return Err(ApiError::internal(msg));
+            }
+        };
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let msg = format!(
+                "pre-deploy command failed (exit {}): {}",
+                output.status.code().unwrap_or(-1),
+                stderr.trim()
+            );
+            warn!("{msg}");
+            let _ = deployments::update_status(
+                &app.db,
+                dep_id,
+                DeploymentStatus::Failed,
+                None,
+                Some(&msg),
+                true,
+            )
+            .await;
+            return Err(ApiError::bad_request(msg));
+        }
+    }
+
     let spec = ContainerSpec {
         image: image.clone(),
         name: container_name.clone(),
