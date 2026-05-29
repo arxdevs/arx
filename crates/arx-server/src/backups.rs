@@ -27,7 +27,7 @@ pub async fn backup_now(app: &AppState, service: &Service) -> ApiResult<BackupRe
     let outfile = std::fs::File::create(&path).map_err(|e| ApiError::internal(e.to_string()))?;
 
     let mut cmd = Command::new("docker");
-    cmd.arg("exec").arg("-i").arg(&container);
+    cmd.arg("exec").arg("-i");
     let mut env_args: Vec<(&str, String)> = Vec::new();
 
     match template {
@@ -54,12 +54,13 @@ pub async fn backup_now(app: &AppState, service: &Service) -> ApiResult<BackupRe
                 args.push(format!("-p{p}"));
             }
             args.push(db);
+            cmd.arg(&container);
             for a in args {
                 cmd.arg(a);
             }
         }
         DbTemplate::Mongodb => {
-            cmd.arg("mongodump").arg("--archive");
+            cmd.arg(&container).arg("mongodump").arg("--archive");
         }
         DbTemplate::Redis => {
             cmd.arg("redis-cli").arg("--rdb").arg("/data/dump.rdb");
@@ -154,7 +155,7 @@ pub async fn restore(app: &AppState, service: &Service, backup_uri: &str) -> Api
     let password = decoded_var(app, service, "DATABASE_PASSWORD").await;
 
     let mut cmd = Command::new("docker");
-    cmd.arg("exec").arg("-i").arg(&container);
+    cmd.arg("exec").arg("-i");
 
     let infile = std::fs::File::open(&path).map_err(|e| ApiError::internal(e.to_string()))?;
     match template {
