@@ -12,6 +12,15 @@ pub struct BackupSchedule {
     pub retention_count: i32,
     pub storage: String,
     pub enabled: bool,
+    pub last_run: Option<DateTime<Utc>>,
+}
+
+fn parse_last_run(row: &sqlx::sqlite::SqliteRow) -> Option<DateTime<Utc>> {
+    row.try_get::<Option<String>, _>("last_run")
+        .ok()
+        .flatten()
+        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+        .map(|d| d.with_timezone(&Utc))
 }
 
 #[derive(Debug, Clone)]
@@ -56,7 +65,7 @@ pub async fn get_schedule(
     service_id: ServiceId,
 ) -> Result<Option<BackupSchedule>> {
     let row = sqlx::query(
-        "SELECT cron_expression, retention_count, storage, enabled
+        "SELECT cron_expression, retention_count, storage, enabled, last_run
          FROM backup_schedules WHERE service_id = ?",
     )
     .bind(service_id.as_uuid().to_string())
@@ -76,12 +85,13 @@ pub async fn get_schedule(
             .try_get::<i64, _>("enabled")
             .map(|n| n != 0)
             .unwrap_or(true),
+        last_run: parse_last_run(&r),
     }))
 }
 
 pub async fn list_all_enabled(pool: &SqlitePool) -> Result<Vec<BackupSchedule>> {
     let rows = sqlx::query(
-        "SELECT service_id, cron_expression, retention_count, storage, enabled
+        "SELECT service_id, cron_expression, retention_count, storage, enabled, last_run
          FROM backup_schedules WHERE enabled = 1",
     )
     .fetch_all(pool)
@@ -101,9 +111,24 @@ pub async fn list_all_enabled(pool: &SqlitePool) -> Result<Vec<BackupSchedule>> 
                 .unwrap_or(7),
             storage: r.try_get("storage").map_err(map_sqlx)?,
             enabled: true,
+            last_run: parse_last_run(&r),
         });
     }
     Ok(out)
+}
+
+pub async fn set_last_run(
+    pool: &SqlitePool,
+    service_id: ServiceId,
+    at: DateTime<Utc>,
+) -> Result<()> {
+    sqlx::query("UPDATE backup_schedules SET last_run = ? WHERE service_id = ?")
+        .bind(at.to_rfc3339())
+        .bind(service_id.as_uuid().to_string())
+        .execute(pool)
+        .await
+        .map_err(map_sqlx)?;
+    Ok(())
 }
 
 pub async fn record(

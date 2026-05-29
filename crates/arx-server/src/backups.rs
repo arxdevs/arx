@@ -294,14 +294,21 @@ pub fn spawn_scheduler(app: AppState) {
 }
 
 async fn scheduler_tick(app: &AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let now = chrono::Utc::now();
     let schedules = arx_db::queries::backups::list_all_enabled(&app.db).await?;
     for s in schedules {
-        let last = arx_db::queries::backups::list_for_service(&app.db, s.service_id, 1).await?;
-        let due = match last.first() {
-            Some(b) => {
-                (chrono::Utc::now() - b.created_at)
-                    > chrono::Duration::try_hours(24).unwrap_or_default()
+        let cron = match s.cron_expression.parse::<croner::Cron>() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, cron = %s.cron_expression, "invalid cron expression; skipping schedule");
+                continue;
             }
+        };
+        let due = match s.last_run {
+            Some(last) => cron
+                .find_next_occurrence(&last, false)
+                .map(|next| next <= now)
+                .unwrap_or(false),
             None => true,
         };
         if !due {
@@ -321,6 +328,11 @@ async fn scheduler_tick(app: &AppState) -> Result<(), Box<dyn std::error::Error 
                 "scheduled backup created"
             ),
             Err(e) => warn!(error = ?e, "scheduled backup failed"),
+        }
+        // Record the attempt so the next run waits for the next cron occurrence
+        // (regardless of success) instead of retrying on every 60s tick.
+        if let Err(e) = arx_db::queries::backups::set_last_run(&app.db, s.service_id, now).await {
+            warn!(error = %e, "failed to update backup last_run");
         }
     }
     Ok(())
