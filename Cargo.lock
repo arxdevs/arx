@@ -94,7 +94,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "arx-build"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "arx-core",
  "globset",
@@ -113,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "arx-cli"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "arx-core",
@@ -135,7 +135,7 @@ dependencies = [
 
 [[package]]
 name = "arx-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "async-trait",
  "chrono",
@@ -150,7 +150,7 @@ dependencies = [
 
 [[package]]
 name = "arx-db"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "arx-core",
  "chacha20poly1305",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "arx-docker"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "arx-core",
  "async-trait",
@@ -187,7 +187,7 @@ dependencies = [
 
 [[package]]
 name = "arx-github"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "arx-core",
  "hex",
@@ -205,7 +205,7 @@ dependencies = [
 
 [[package]]
 name = "arx-server"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "arx-build",
@@ -240,7 +240,7 @@ dependencies = [
 
 [[package]]
 name = "arx-traefik"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "arx-core",
  "reqwest",
