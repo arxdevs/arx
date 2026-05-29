@@ -216,7 +216,7 @@ async fn manifest_flow(ctx: &SetupContext, http: &reqwest::Client) -> Result<Man
         },
         "redirect_url": redirect_url.clone(),
         "callback_urls": [format!("{public_url}/v1/auth/github/callback")],
-        "public": false,
+        "public": true,
 
 
         "default_permissions": {
