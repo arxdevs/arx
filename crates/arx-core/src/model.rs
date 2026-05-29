@@ -113,6 +113,9 @@ pub struct Service {
     /// `None` = use the auto-detected stack's default.
     pub build_command: Option<String>,
     pub start_command: Option<String>,
+    /// One-off command run in a throwaway container before the new container
+    /// goes live (e.g. DB migrations). `None` = skip.
+    pub pre_deploy_command: Option<String>,
     /// Docker restart policy: "no" | "unless-stopped" | "always" | "on-failure".
     pub restart_policy: String,
     pub created_at: DateTime<Utc>,

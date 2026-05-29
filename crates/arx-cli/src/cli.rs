@@ -371,6 +371,9 @@ pub(crate) enum ServiceConfigCmd {
         build_command: Option<String>,
         #[arg(long = "start-cmd")]
         start_command: Option<String>,
+        /// Command run before the new container goes live (e.g. migrations). Empty string ("") clears.
+        #[arg(long = "pre-deploy-cmd")]
+        pre_deploy_command: Option<String>,
         /// Restart policy: no | unless-stopped | always | on-failure.
         #[arg(long = "restart-policy")]
         restart_policy: Option<String>,
