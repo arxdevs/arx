@@ -34,11 +34,22 @@ impl Pm {
         }
     }
 
-    fn corepack_line(self) -> &'static str {
+    fn name(self) -> &'static str {
         match self {
-            Pm::Npm | Pm::Bun => "",
-            Pm::Pnpm => "RUN corepack enable && corepack prepare pnpm@latest --activate\n",
-            Pm::Yarn => "RUN corepack enable && corepack prepare yarn@stable --activate\n",
+            Pm::Npm => "npm",
+            Pm::Pnpm => "pnpm",
+            Pm::Yarn => "yarn",
+            Pm::Bun => "bun",
+        }
+    }
+
+    /// Pinned corepack default when the repo has no `packageManager` field.
+    /// Never `latest` — that is the source of non-deterministic builds.
+    fn corepack_default(self) -> Option<&'static str> {
+        match self {
+            Pm::Pnpm => Some("pnpm@10"),
+            Pm::Yarn => Some("yarn@stable"),
+            Pm::Npm | Pm::Bun => None,
         }
     }
 
@@ -61,6 +72,9 @@ pub struct Node {
     pm: Pm,
     has_lock: bool,
     has_start_script: bool,
+    /// Sanitized `packageManager` spec (e.g. `pnpm@9.0.0`) when the repo pins
+    /// one. Honored over the pinned default so builds match the lockfile's PM.
+    pm_spec: Option<String>,
     workspace: Option<WorkspaceContext>,
 }
 
@@ -81,7 +95,31 @@ impl Node {
         let (pm, has_lock) = detect_pm(dir);
         self.pm = pm;
         self.has_lock = has_lock;
+        // The monorepo root's `packageManager` is authoritative for workspaces.
+        if let Some(spec) = read_package_manager(dir) {
+            self.pm_spec = Some(spec);
+        }
         self
+    }
+
+    /// corepack section honoring the repo's `packageManager` (when it matches
+    /// the detected PM), else a pinned default. Disables corepack's interactive
+    /// download prompt so the pinned/declared version is fetched non-interactively.
+    fn corepack_section(&self) -> String {
+        let prefix = format!("{}@", self.pm.name());
+        let spec = self
+            .pm_spec
+            .as_deref()
+            .filter(|s| s.starts_with(&prefix))
+            .map(str::to_string)
+            .or_else(|| self.pm.corepack_default().map(str::to_string));
+        match spec {
+            Some(s) => format!(
+                "ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0\n\
+                 RUN corepack enable && corepack prepare {s} --activate\n"
+            ),
+            None => String::new(),
+        }
     }
 }
 
@@ -99,6 +137,10 @@ impl Node {
             .and_then(|v| v.as_str())
             .map(String::from);
         let has_start_script = pkg.get("scripts").and_then(|v| v.get("start")).is_some();
+        let pm_spec = pkg
+            .get("packageManager")
+            .and_then(|v| v.as_str())
+            .and_then(validate::parse_package_manager);
 
         let nvmrc = source_dir.join(".nvmrc");
         let node_version_file = source_dir.join(".node-version");
@@ -120,6 +162,7 @@ impl Node {
             pm,
             has_lock,
             has_start_script,
+            pm_spec,
             workspace: None,
         }))
     }
@@ -161,7 +204,7 @@ impl Node {
         let start_json = validate::cmd_to_json_token(start_raw, "start_command")?;
         let node_major = self.node_major;
 
-        let pm_install = self.pm.corepack_line();
+        let corepack = self.corepack_section();
         let bun_install = self.pm.base_image_extra();
 
         Ok(format!(
@@ -169,7 +212,7 @@ impl Node {
              FROM node:{node_major}-bookworm-slim\n\
              WORKDIR /app\n\
              {bun_install}\
-             {pm_install}\
+             {corepack}\
              COPY . .\n\
              {build_run}\n\
              ENV PORT=8080\n\
@@ -185,7 +228,8 @@ impl Node {
     ) -> Result<String, BuildError> {
         let filter = workspace_filter_token(self.pm, ws)?;
         let install_cmd = self.pm.install_cmd(self.has_lock);
-        let default_build = format!("{install_cmd} && {filter} run build");
+        // Install runs once in its own layer (below); the build step only builds.
+        let default_build = format!("{filter} run build");
         let default_start = format!("{filter} run start");
 
         let build_raw = ov.build_command.unwrap_or(default_build.as_str());
@@ -196,41 +240,76 @@ impl Node {
         let start_json = validate::cmd_to_json_token(start_raw, "start_command")?;
         let install_quoted = validate::shell_single_quote(install_cmd, "build_command")?;
         let node_major = self.node_major;
-        let pm_install = self.pm.corepack_line();
+        let corepack = self.corepack_section();
         let bun_install = self.pm.base_image_extra();
 
-        // Layer caching: copy lockfile + workspace metadata first to warm the
-        // package-manager cache, then copy the full tree and install again.
-        // The second install is almost entirely a cache hit.
-        let lockfile_line = match self.pm {
-            Pm::Pnpm => "COPY pnpm-lock.yaml* ./\n",
-            Pm::Npm => "COPY package-lock.json* ./\n",
-            Pm::Yarn => "COPY yarn.lock* ./\n",
-            Pm::Bun => "COPY bun.lockb* ./\n",
-        };
-        let workspace_meta_line = match ws.kind {
-            WorkspaceKind::Pnpm => "COPY pnpm-workspace.yaml* ./\nCOPY turbo.json* ./\n",
-            WorkspaceKind::Turbo => "COPY turbo.json* ./\nCOPY pnpm-workspace.yaml* ./\n",
-            WorkspaceKind::NpmYarnBun => "COPY turbo.json* ./\n",
-        };
-
-        Ok(format!(
+        let header = format!(
             "# syntax=docker/dockerfile:1.7\n\
              FROM node:{node_major}-bookworm-slim\n\
              WORKDIR /app\n\
              {bun_install}\
-             {pm_install}\
-             COPY package.json ./\n\
-             {lockfile_line}\
-             {workspace_meta_line}\
-             RUN sh -c '{install_quoted}' || true\n\
-             COPY . .\n\
-             {build_run}\n\
-             ENV PORT=8080\n\
+             {corepack}"
+        );
+        let footer = format!(
+            "ENV PORT=8080\n\
              EXPOSE 8080\n\
              CMD [\"sh\",\"-c\",{start_json}]\n"
-        ))
+        );
+
+        // Dependency layer: copy only the workspace manifests + lockfile, then a
+        // single install. This caches across source-only changes and avoids the
+        // double-install (root-only pre-install + full install) that corrupts
+        // pnpm's store and empties node_modules. Fall back to copying the whole
+        // tree when manifests can't be enumerated — a partial set would break
+        // `--frozen-lockfile`.
+        let body = match manifest_copy_lines(&ws.workspace_manifests) {
+            Some(manifests) => {
+                let lockfile_line = match self.pm {
+                    Pm::Pnpm => "COPY pnpm-lock.yaml* ./\n",
+                    Pm::Npm => "COPY package-lock.json* ./\n",
+                    Pm::Yarn => "COPY yarn.lock* ./\n",
+                    Pm::Bun => "COPY bun.lockb* ./\n",
+                };
+                let workspace_meta_line = match ws.kind {
+                    WorkspaceKind::Pnpm => "COPY pnpm-workspace.yaml* ./\nCOPY turbo.json* ./\n",
+                    WorkspaceKind::Turbo => "COPY turbo.json* ./\nCOPY pnpm-workspace.yaml* ./\n",
+                    WorkspaceKind::NpmYarnBun => "COPY turbo.json* ./\n",
+                };
+                format!(
+                    "COPY package.json ./\n\
+                     {lockfile_line}\
+                     {workspace_meta_line}\
+                     {manifests}\
+                     RUN sh -c '{install_quoted}'\n\
+                     COPY . .\n\
+                     {build_run}\n"
+                )
+            }
+            None => format!(
+                "COPY . .\n\
+                 RUN sh -c '{install_quoted}'\n\
+                 {build_run}\n"
+            ),
+        };
+
+        Ok(format!("{header}{body}{footer}"))
     }
+}
+
+/// COPY lines (exec form) for each workspace `package.json`. Returns `None` to
+/// trigger the copy-all fallback: empty list, or any path unsafe to embed.
+fn manifest_copy_lines(manifests: &[String]) -> Option<String> {
+    if manifests.is_empty() {
+        return None;
+    }
+    let mut s = String::new();
+    for p in manifests {
+        if !validate::is_safe_copy_path(p) {
+            return None;
+        }
+        s.push_str(&format!("COPY [\"{p}\", \"{p}\"]\n"));
+    }
+    Some(s)
 }
 
 fn workspace_filter_token(pm: Pm, ws: &WorkspaceContext) -> Result<String, BuildError> {
@@ -289,6 +368,15 @@ fn read_capped(p: &Path, cap: u64) -> std::io::Result<String> {
     std::fs::read_to_string(p)
 }
 
+/// Read and sanitize the `packageManager` field from a directory's package.json.
+fn read_package_manager(dir: &Path) -> Option<String> {
+    let raw = read_capped(&dir.join("package.json"), 256 * 1024).ok()?;
+    let v: Value = serde_json::from_str(&raw).ok()?;
+    v.get("packageManager")
+        .and_then(|x| x.as_str())
+        .and_then(validate::parse_package_manager)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +386,7 @@ mod tests {
             kind,
             package_rel_path: path.to_string(),
             package_name: name.map(String::from),
+            workspace_manifests: vec![format!("{path}/package.json")],
         }
     }
 
@@ -313,6 +402,7 @@ mod tests {
             pm: Pm::Pnpm,
             has_lock: true,
             has_start_script: true,
+            pm_spec: None,
             workspace: None,
         };
         let out = render(n);
@@ -329,6 +419,7 @@ mod tests {
             pm: Pm::Pnpm,
             has_lock: true,
             has_start_script: true,
+            pm_spec: None,
             workspace: Some(workspace(WorkspaceKind::Pnpm, "apps/web", Some("web"))),
         };
         let out = render(n);
@@ -345,6 +436,7 @@ mod tests {
             pm: Pm::Bun,
             has_lock: true,
             has_start_script: true,
+            pm_spec: None,
             workspace: Some(workspace(
                 WorkspaceKind::NpmYarnBun,
                 "apps/api",
@@ -364,6 +456,7 @@ mod tests {
             pm: Pm::Npm,
             has_lock: true,
             has_start_script: true,
+            pm_spec: None,
             workspace: Some(workspace(
                 WorkspaceKind::NpmYarnBun,
                 "packages/jobs",
@@ -381,6 +474,7 @@ mod tests {
             pm: Pm::Yarn,
             has_lock: true,
             has_start_script: true,
+            pm_spec: None,
             workspace: Some(workspace(WorkspaceKind::NpmYarnBun, "apps/web", None)),
         };
         let err = n
@@ -402,6 +496,7 @@ mod tests {
             pm: Pm::Yarn,
             has_lock: true,
             has_start_script: true,
+            pm_spec: None,
             workspace: Some(workspace(
                 WorkspaceKind::NpmYarnBun,
                 "apps/web",
@@ -416,5 +511,127 @@ mod tests {
     fn workspace_filter_rejects_path_traversal() {
         let ws = workspace(WorkspaceKind::Pnpm, "../etc", Some("evil"));
         assert!(workspace_filter_token(Pm::Pnpm, &ws).is_err());
+    }
+
+    #[test]
+    fn corepack_honors_package_manager_field() {
+        let n = Node {
+            node_major: 22,
+            pm: Pm::Pnpm,
+            has_lock: true,
+            has_start_script: true,
+            pm_spec: Some("pnpm@9.0.0".to_string()),
+            workspace: Some(workspace(WorkspaceKind::Pnpm, "apps/web", Some("web"))),
+        };
+        let out = render(n);
+        assert!(out.contains("corepack prepare pnpm@9.0.0 --activate"));
+        assert!(out.contains("ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0"));
+        assert!(!out.contains("pnpm@latest"));
+    }
+
+    #[test]
+    fn corepack_pins_default_without_package_manager() {
+        let n = Node {
+            node_major: 22,
+            pm: Pm::Pnpm,
+            has_lock: true,
+            has_start_script: true,
+            pm_spec: None,
+            workspace: Some(workspace(WorkspaceKind::Pnpm, "apps/web", Some("web"))),
+        };
+        let out = render(n);
+        assert!(out.contains("corepack prepare pnpm@10 --activate"));
+        assert!(!out.contains("pnpm@latest"));
+    }
+
+    #[test]
+    fn corepack_ignores_mismatched_package_manager() {
+        // packageManager says yarn but the detected PM is pnpm -> use pnpm default.
+        let n = Node {
+            node_major: 22,
+            pm: Pm::Pnpm,
+            has_lock: true,
+            has_start_script: true,
+            pm_spec: Some("yarn@4.1.0".to_string()),
+            workspace: Some(workspace(WorkspaceKind::Pnpm, "apps/web", Some("web"))),
+        };
+        let out = render(n);
+        assert!(out.contains("corepack prepare pnpm@10 --activate"));
+        assert!(!out.contains("yarn@4.1.0"));
+    }
+
+    #[test]
+    fn workspace_installs_once_and_copies_manifests() {
+        let n = Node {
+            node_major: 22,
+            pm: Pm::Pnpm,
+            has_lock: true,
+            has_start_script: true,
+            pm_spec: None,
+            workspace: Some(WorkspaceContext {
+                kind: WorkspaceKind::Pnpm,
+                package_rel_path: "apps/web".to_string(),
+                package_name: Some("web".to_string()),
+                workspace_manifests: vec![
+                    "apps/web/package.json".to_string(),
+                    "packages/ui/package.json".to_string(),
+                ],
+            }),
+        };
+        let out = render(n);
+        assert!(out.contains("COPY [\"apps/web/package.json\", \"apps/web/package.json\"]"));
+        assert!(out.contains("COPY [\"packages/ui/package.json\", \"packages/ui/package.json\"]"));
+        // single install (dependency layer); the old speculative pre-install
+        // (`<install>' || true`) is gone.
+        assert!(!out.contains("--frozen-lockfile' || true"));
+        assert_eq!(out.matches("pnpm install --frozen-lockfile").count(), 1);
+        // build step builds only, secret mount preserved
+        assert!(out.contains("pnpm --filter ./apps/web run build"));
+        assert!(out.contains("--mount=type=secret,id=arx_env"));
+    }
+
+    #[test]
+    fn workspace_falls_back_to_copy_all_without_manifests() {
+        let n = Node {
+            node_major: 22,
+            pm: Pm::Pnpm,
+            has_lock: true,
+            has_start_script: true,
+            pm_spec: None,
+            workspace: Some(WorkspaceContext {
+                kind: WorkspaceKind::Pnpm,
+                package_rel_path: "apps/web".to_string(),
+                package_name: Some("web".to_string()),
+                workspace_manifests: vec![],
+            }),
+        };
+        let out = render(n);
+        // no manifest dependency layer
+        assert!(!out.contains("COPY pnpm-lock.yaml*"));
+        assert!(!out.contains("COPY ["));
+        // still a single correct install over the full tree
+        assert!(out.contains("COPY . ."));
+        assert_eq!(out.matches("pnpm install --frozen-lockfile").count(), 1);
+        assert!(!out.contains("--frozen-lockfile' || true"));
+    }
+
+    #[test]
+    fn unsafe_manifest_path_triggers_copy_all_fallback() {
+        let n = Node {
+            node_major: 22,
+            pm: Pm::Pnpm,
+            has_lock: true,
+            has_start_script: true,
+            pm_spec: None,
+            workspace: Some(WorkspaceContext {
+                kind: WorkspaceKind::Pnpm,
+                package_rel_path: "apps/web".to_string(),
+                package_name: Some("web".to_string()),
+                workspace_manifests: vec!["../evil/package.json".to_string()],
+            }),
+        };
+        let out = render(n);
+        assert!(!out.contains("COPY ["));
+        assert!(out.contains("COPY . ."));
     }
 }

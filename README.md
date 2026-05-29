@@ -53,6 +53,8 @@ RUN --mount=type=secret,id=arx_env \
 
 Point each service at a workspace package with `--root-directory`. arx will detect `turbo.json` / `pnpm-workspace.yaml` / `package.json#workspaces` in an ancestor directory and switch to a workspace-aware build (`pnpm --filter ./apps/web`, `bun --filter`, `npm -w`, or `yarn workspace <name>`). The Docker build context becomes the monorepo root, so a `.dockerignore` at the root is recommended.
 
+The build honors the repo's `packageManager` field (corepack), copies only the workspace `package.json` manifests into a cached dependency-install layer, and installs once — so source-only changes reuse the install cache.
+
 ```bash
 arx -w default -p demo service create \
     --slug web --name Web --kind git \

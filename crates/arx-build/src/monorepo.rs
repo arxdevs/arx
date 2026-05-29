@@ -20,6 +20,10 @@ pub struct WorkspaceContext {
     pub kind: WorkspaceKind,
     pub package_rel_path: String,
     pub package_name: Option<String>,
+    /// Root-relative paths of every workspace package's `package.json`, used to
+    /// COPY just the manifests into a cached dependency-install layer. Empty
+    /// when enumeration failed (caller falls back to copying the whole tree).
+    pub workspace_manifests: Vec<String>,
 }
 
 pub fn detect(source_root: &Path, root_directory: Option<&Path>) -> Option<MonorepoLayout> {
@@ -102,6 +106,141 @@ pub fn read_package_name(package_dir: &Path) -> Option<String> {
     v.get("name")
         .and_then(|n| n.as_str())
         .map(|s| s.to_string())
+}
+
+/// Root-relative paths (`<dir>/package.json`) of every workspace package, by
+/// expanding the workspace globs against the on-disk monorepo `root`. Returns
+/// empty when the globs can't be read/parsed — callers fall back to copying the
+/// whole tree before install, so a partial set never breaks `--frozen-lockfile`.
+pub fn workspace_manifest_paths(root: &Path) -> Vec<String> {
+    let patterns = workspace_globs(root);
+    if patterns.is_empty() {
+        return Vec::new();
+    }
+    let mut builder = globset::GlobSetBuilder::new();
+    let mut any = false;
+    for p in &patterns {
+        // `literal_separator(true)` makes `*` a single path segment (fast-glob
+        // semantics used by pnpm/npm), so `apps/*` matches `apps/web` only.
+        if let Ok(g) = globset::GlobBuilder::new(p).literal_separator(true).build() {
+            builder.add(g);
+            any = true;
+        }
+    }
+    if !any {
+        return Vec::new();
+    }
+    let Ok(set) = builder.build() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    collect_package_dirs(root, root, &set, 0, &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn workspace_globs(root: &Path) -> Vec<String> {
+    for f in ["pnpm-workspace.yaml", "pnpm-workspace.yml"] {
+        if let Ok(raw) = std::fs::read_to_string(root.join(f)) {
+            let pats = parse_pnpm_workspace_packages(&raw);
+            if !pats.is_empty() {
+                return pats;
+            }
+        }
+    }
+    if let Ok(raw) = std::fs::read_to_string(root.join("package.json"))
+        && let Ok(v) = serde_json::from_str::<Value>(&raw)
+    {
+        return package_json_workspace_globs(&v);
+    }
+    Vec::new()
+}
+
+fn package_json_workspace_globs(v: &Value) -> Vec<String> {
+    let arr = match v.get("workspaces") {
+        Some(Value::Array(a)) => a,
+        Some(Value::Object(o)) => match o.get("packages") {
+            Some(Value::Array(a)) => a,
+            _ => return Vec::new(),
+        },
+        _ => return Vec::new(),
+    };
+    arr.iter()
+        .filter_map(|x| x.as_str())
+        .filter(|s| !s.starts_with('!'))
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Minimal line-based reader for the `packages:` list in `pnpm-workspace.yaml`
+/// (avoids pulling in a YAML dependency). Negation patterns (`!...`) are skipped.
+fn parse_pnpm_workspace_packages(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_packages = false;
+    for line in raw.lines() {
+        if !in_packages {
+            if line.trim_end() == "packages:" {
+                in_packages = true;
+            }
+            continue;
+        }
+        // A non-indented, non-empty line starts the next top-level key.
+        if !line.starts_with([' ', '\t']) && !line.trim().is_empty() {
+            break;
+        }
+        if let Some(rest) = line.trim_start().strip_prefix('-') {
+            let item = strip_yaml_quotes(rest.trim());
+            if !item.is_empty() && !item.starts_with('!') {
+                out.push(item.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn strip_yaml_quotes(s: &str) -> &str {
+    let s = s.trim();
+    if s.len() >= 2
+        && ((s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('"') && s.ends_with('"')))
+    {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
+}
+
+fn collect_package_dirs(
+    root: &Path,
+    dir: &Path,
+    set: &globset::GlobSet,
+    depth: usize,
+    out: &mut Vec<String>,
+) {
+    if depth > 8 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || matches!(name.as_ref(), "node_modules" | "target") {
+            continue;
+        }
+        if let Ok(rel) = path.strip_prefix(root) {
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            if set.is_match(&rel_str) && path.join("package.json").is_file() {
+                out.push(format!("{rel_str}/package.json"));
+            }
+        }
+        collect_package_dirs(root, &path, set, depth + 1, out);
+    }
 }
 
 #[cfg(test)]
@@ -238,5 +377,80 @@ mod tests {
         fs::create_dir_all(&pkg).unwrap();
         fs::write(pkg.join("package.json"), r#"{"name":"@org/web"}"#).unwrap();
         assert_eq!(read_package_name(&pkg).as_deref(), Some("@org/web"));
+    }
+
+    #[test]
+    fn manifest_paths_from_pnpm_workspace() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - 'apps/*'\n  - 'packages/*'\n",
+        )
+        .unwrap();
+        for p in ["apps/web", "apps/api", "packages/ui"] {
+            let d = root.join(p);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("package.json"), "{}").unwrap();
+        }
+        // a nested dir without package.json must not be picked up
+        fs::create_dir_all(root.join("apps/web/src")).unwrap();
+
+        let mut got = workspace_manifest_paths(root);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                "apps/api/package.json".to_string(),
+                "apps/web/package.json".to_string(),
+                "packages/ui/package.json".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn manifest_paths_from_package_json_workspaces() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        let d = root.join("packages/jobs");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("package.json"), "{}").unwrap();
+
+        assert_eq!(
+            workspace_manifest_paths(root),
+            vec!["packages/jobs/package.json".to_string()]
+        );
+    }
+
+    #[test]
+    fn manifest_paths_empty_when_no_definition() {
+        let dir = tempdir().unwrap();
+        assert!(workspace_manifest_paths(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn star_does_not_cross_path_separator() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - 'apps/*'\n",
+        )
+        .unwrap();
+        // apps/web is a package; apps/web/nested is NOT matched by `apps/*`
+        let nested = root.join("apps/web/nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(root.join("apps/web/package.json"), "{}").unwrap();
+        fs::write(nested.join("package.json"), "{}").unwrap();
+
+        assert_eq!(
+            workspace_manifest_paths(root),
+            vec!["apps/web/package.json".to_string()]
+        );
     }
 }

@@ -127,6 +127,7 @@ fn build_stack(
                     .to_string_lossy()
                     .replace(std::path::MAIN_SEPARATOR, "/"),
                 package_name: monorepo::read_package_name(package_dir),
+                workspace_manifests: monorepo::workspace_manifest_paths(&m.root),
             };
             return Some(node.with_workspace(ws));
         }

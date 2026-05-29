@@ -101,21 +101,60 @@ fn monorepo_shape_renders_workspace_aware_dockerfiles_for_each_service() {
     assert!(monorepo::detect(single.path(), None).is_none());
 }
 
+/// Real end-to-end build of a pnpm workspace with an actual dependency — the
+/// regression test for the monorepo pnpm bug. The generated Dockerfile must
+/// honor `packageManager` (pnpm@9), install once into a cached layer, and leave
+/// `node_modules` populated so the build step can resolve its dependency. With
+/// the old double-install bug the modules were purged and `require('is-odd')`
+/// in the build script would throw, failing `docker build`.
+///
+/// Needs docker + network. Opt in with `--ignored`.
 #[test]
-#[ignore = "invokes real `docker build`; opt in with --ignored"]
-fn monorepo_real_docker_build_for_web_service() {
-    let dir = make_monorepo();
+#[ignore = "invokes real docker build (network); opt in with --ignored"]
+fn monorepo_real_pnpm_build_resolves_dependency() {
+    let dir = tempdir().unwrap();
     let root = dir.path();
 
-    // Override install/build so the test doesn't need an internet round-trip
-    // to actually run pnpm install. The Dockerfile shape is the point — we
-    // still want docker to ingest it and produce an image.
+    write(
+        &root.join("package.json"),
+        r#"{"name":"root","private":true,"packageManager":"pnpm@9.12.0"}"#,
+    );
+    write(
+        &root.join("pnpm-workspace.yaml"),
+        "packages:\n  - 'apps/*'\n",
+    );
+    write(
+        &root.join("apps/web/package.json"),
+        r#"{"name":"web","dependencies":{"is-odd":"3.0.1"},"scripts":{"build":"node -e \"require('is-odd'); console.log('ARX_E2E_DEPS_OK')\""}}"#,
+    );
+    write(&root.join("apps/web/index.js"), "console.log('hi');\n");
+
+    // Produce a real frozen lockfile using pnpm inside docker (no local pnpm).
+    let lockgen = std::process::Command::new("docker")
+        .args(["run", "--rm", "-v"])
+        .arg(format!("{}:/app", root.display()))
+        .args([
+            "-w",
+            "/app",
+            "node:22-bookworm-slim",
+            "sh",
+            "-lc",
+            "corepack enable && corepack prepare pnpm@9.12.0 --activate && pnpm install --lockfile-only",
+        ])
+        .status()
+        .expect("spawn docker for lockfile generation");
+    assert!(lockgen.success(), "pnpm lockfile generation failed");
+    assert!(
+        root.join("pnpm-lock.yaml").exists(),
+        "no pnpm-lock.yaml produced"
+    );
+
     let input = BuildInput {
         source_dir: root.to_path_buf(),
-        image_tag: "arx-e2e-monorepo-web:latest".to_string(),
+        image_tag: "arx-e2e-pnpm-web:latest".to_string(),
         dockerfile: None,
         root_directory: Some(PathBuf::from("apps/web")),
-        build_command: Some("echo skipping-install-for-e2e".to_string()),
+        build_command: None,
         start_command: Some("node /app/apps/web/index.js".to_string()),
         build_env: vec![],
     };
@@ -124,18 +163,19 @@ fn monorepo_real_docker_build_for_web_service() {
         .enable_all()
         .build()
         .unwrap();
+    // A successful build proves: corepack used pnpm@9.12.0, the single frozen
+    // install populated node_modules, and the dependency resolved at build time.
     let out = rt
         .block_on(async { build(&input).await })
-        .expect("build ok");
+        .expect("docker build should succeed");
 
     match out.used {
         BuilderKind::Stack { name } => assert_eq!(name, "node"),
         other => panic!("expected Node stack, got {other:?}"),
     }
-    assert_eq!(out.image_ref, "arx-e2e-monorepo-web:latest");
+    assert_eq!(out.image_ref, "arx-e2e-pnpm-web:latest");
 
-    // Clean up the local image so the test doesn't leak.
     let _ = std::process::Command::new("docker")
-        .args(["rmi", "-f", "arx-e2e-monorepo-web:latest"])
+        .args(["rmi", "-f", "arx-e2e-pnpm-web:latest"])
         .status();
 }
