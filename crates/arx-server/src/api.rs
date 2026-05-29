@@ -1165,6 +1165,9 @@ async fn put_backup_schedule(
 ) -> ApiResult<()> {
     let (_, _) = require_workspace_role(&app, user.user_id, &ws).await?;
     let (_, _, s) = resolve_wps(&app, &ws, &proj, &svc).await?;
+    if req.cron_expression.parse::<croner::Cron>().is_err() {
+        return Err(ApiError::bad_request("invalid cron expression"));
+    }
     arx_db::queries::backups::upsert_schedule(
         &app.db,
         s.id,

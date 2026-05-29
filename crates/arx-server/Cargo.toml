@@ -46,3 +46,4 @@ reqwest = { workspace = true }
 sha2 = { workspace = true }
 hickory-resolver = "0.24"
 globset = { workspace = true }
+croner = "3.0.1"
