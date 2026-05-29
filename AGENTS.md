@@ -68,7 +68,7 @@ Build the daemon image locally with `docker build -t arx:local -f Dockerfile .`.
 
 ## Things not to do
 
-- **Do not** reintroduce a runtime build agent (railpack, nixpacks, buildkit container, etc.). The decision is to keep stack templates inline; see commit history for the migration that removed buildkit.
+- **Do not** reintroduce a runtime build agent (railpack, nixpacks, buildkit container, etc.). The decision is to keep stack templates inline; see commit history for the migration that removed buildkit. (Note: this is distinct from `DOCKER_BUILDKIT=1 docker build`, which the build path enables to use `--secret`/`--mount=type=secret`. Using Docker's built-in BuildKit frontend is fine — it is not a separate build agent.)
 - **Do not** expose port 7878 publicly. The daemon binds `127.0.0.1:7878`; Traefik routes `arx.<root-domain>` to it.
 - **Do not** write generated Dockerfiles into the user's repo. Use the existing `docker_build_stdin` path (`docker build -f -`).
 - **Do not** commit `compose.override.yml`. It is gitignored — it exists only as a local dev override for `arx:local`.

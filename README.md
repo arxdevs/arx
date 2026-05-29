@@ -37,6 +37,18 @@ arx -w default -p demo service config set web \
     --build-cmd "..." --start-cmd "..."
 ```
 
+Service variables (`var set`) are available **both at build time and at runtime**.
+For auto-detected stacks they appear in your build command as ordinary env vars
+(e.g. `process.env.MY_VAR`) — no code change. They ride a BuildKit secret, so
+values never land in the image history or layers. In a **custom `Dockerfile`**
+you opt in by mounting the secret yourself:
+
+```dockerfile
+# syntax=docker/dockerfile:1.7
+RUN --mount=type=secret,id=arx_env \
+    . /run/secrets/arx_env && npm run build
+```
+
 ### Monorepos
 
 Point each service at a workspace package with `--root-directory`. arx will detect `turbo.json` / `pnpm-workspace.yaml` / `package.json#workspaces` in an ancestor directory and switch to a workspace-aware build (`pnpm --filter ./apps/web`, `bun --filter`, `npm -w`, or `yarn workspace <name>`). The Docker build context becomes the monorepo root, so a `.dockerignore` at the root is recommended.
