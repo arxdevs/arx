@@ -148,6 +148,9 @@ pub(crate) enum ServerCmd {
 
     #[command(subcommand)]
     Cert(ServerCertCmd),
+
+    /// Re-sync GitHub App installations and their repositories from GitHub
+    Sync,
 }
 
 #[derive(Debug, Subcommand)]

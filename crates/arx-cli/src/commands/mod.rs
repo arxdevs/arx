@@ -803,6 +803,13 @@ pub(crate) async fn dispatch(
                 .unwrap_or(Value::Null);
             print_value(&v, cli.json);
         }
+        Command::Server(ServerCmd::Sync) => {
+            let v = client
+                .request(reqwest::Method::POST, "/v1/server/github/sync", None)
+                .await?
+                .unwrap_or(Value::Null);
+            print_value(&v, cli.json);
+        }
         Command::Volume(VolumeCmd::List) => {
             let w = ws(cli.workspace.as_deref())?;
             let v = client

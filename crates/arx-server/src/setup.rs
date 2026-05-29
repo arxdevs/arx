@@ -16,6 +16,15 @@ pub fn routes() -> Router<AppState> {
             get(get_settings).patch(patch_settings),
         )
         .route("/v1/server/cert/retry", post(cert_retry))
+        .route("/v1/server/github/sync", post(sync_github))
+}
+
+async fn sync_github(
+    crate::auth::Auth(_): crate::auth::Auth,
+    State(app): State<AppState>,
+) -> ApiResult<Json<crate::github_sync::SyncReport>> {
+    let report = crate::github_sync::reconcile_installations(&app).await?;
+    Ok(Json(report))
 }
 
 async fn cert_retry(
