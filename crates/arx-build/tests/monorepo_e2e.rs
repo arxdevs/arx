@@ -117,6 +117,7 @@ fn monorepo_real_docker_build_for_web_service() {
         root_directory: Some(PathBuf::from("apps/web")),
         build_command: Some("echo skipping-install-for-e2e".to_string()),
         start_command: Some("node /app/apps/web/index.js".to_string()),
+        build_env: vec![],
     };
 
     let rt = tokio::runtime::Builder::new_current_thread()

@@ -157,6 +157,7 @@ impl Node {
         let start_raw = ov.start_command.unwrap_or(default_start.as_str());
 
         let build_quoted = validate::shell_single_quote(build_raw, "build_command")?;
+        let build_run = crate::stack::build_run_with_env(&build_quoted);
         let start_json = validate::cmd_to_json_token(start_raw, "start_command")?;
         let node_major = self.node_major;
 
@@ -170,7 +171,7 @@ impl Node {
              {bun_install}\
              {pm_install}\
              COPY . .\n\
-             RUN sh -c '{build_quoted}'\n\
+             {build_run}\n\
              ENV PORT=8080\n\
              EXPOSE 8080\n\
              CMD [\"sh\",\"-c\",{start_json}]\n"
@@ -191,6 +192,7 @@ impl Node {
         let start_raw = ov.start_command.unwrap_or(default_start.as_str());
 
         let build_quoted = validate::shell_single_quote(build_raw, "build_command")?;
+        let build_run = crate::stack::build_run_with_env(&build_quoted);
         let start_json = validate::cmd_to_json_token(start_raw, "start_command")?;
         let install_quoted = validate::shell_single_quote(install_cmd, "build_command")?;
         let node_major = self.node_major;
@@ -223,7 +225,7 @@ impl Node {
              {workspace_meta_line}\
              RUN sh -c '{install_quoted}' || true\n\
              COPY . .\n\
-             RUN sh -c '{build_quoted}'\n\
+             {build_run}\n\
              ENV PORT=8080\n\
              EXPOSE 8080\n\
              CMD [\"sh\",\"-c\",{start_json}]\n"
