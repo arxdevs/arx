@@ -123,6 +123,17 @@ pub(crate) async fn dispatch(
                 .unwrap_or(Value::Null);
             print_value(&v, cli.json);
         }
+        Command::Workspace(WorkspaceCmd::Rename { slug, name }) => {
+            let v = client
+                .request(
+                    reqwest::Method::PATCH,
+                    &format!("/v1/workspaces/{slug}"),
+                    Some(json!({ "name": name })),
+                )
+                .await?
+                .unwrap_or(Value::Null);
+            print_value(&v, cli.json);
+        }
         Command::Project(ProjectCmd::List) => {
             let w = ws(cli.workspace.as_deref())?;
             let v = client

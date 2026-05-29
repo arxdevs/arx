@@ -24,7 +24,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/v1/workspaces/:ws",
-            get(get_workspace).delete(delete_workspace),
+            get(get_workspace)
+                .patch(rename_workspace)
+                .delete(delete_workspace),
         )
         .route(
             "/v1/workspaces/:ws/members",
@@ -315,6 +317,27 @@ async fn get_workspace(
 ) -> ApiResult<Json<WorkspaceResp>> {
     let (_, _) = require_workspace_role(&app, user.user_id, &ws).await?;
     let w = workspaces::get_by_slug(&app.db, &ws).await?;
+    Ok(Json(WorkspaceResp {
+        id: w.id.as_uuid().to_string(),
+        slug: w.slug,
+        name: w.name,
+    }))
+}
+
+#[derive(Deserialize)]
+struct PatchWorkspaceReq {
+    name: String,
+}
+
+async fn rename_workspace(
+    Auth(user): Auth,
+    State(app): State<AppState>,
+    Path(ws): Path<String>,
+    Json(req): Json<PatchWorkspaceReq>,
+) -> ApiResult<Json<WorkspaceResp>> {
+    let ws_id = require_admin(&app, user.user_id, &ws).await?;
+    workspaces::rename(&app.db, ws_id, &req.name).await?;
+    let w = workspaces::get_by_id(&app.db, ws_id).await?;
     Ok(Json(WorkspaceResp {
         id: w.id.as_uuid().to_string(),
         slug: w.slug,
