@@ -261,6 +261,10 @@ pub(crate) enum ProjectCmd {
         #[arg(long)]
         with_data: bool,
     },
+    Rename {
+        slug: String,
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

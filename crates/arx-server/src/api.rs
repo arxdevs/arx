@@ -39,7 +39,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/v1/workspaces/:ws/projects/:proj",
-            get(get_project).delete(delete_project),
+            get(get_project)
+                .patch(rename_project)
+                .delete(delete_project),
         )
         .route(
             "/v1/workspaces/:ws/projects/:proj/environments",
@@ -456,6 +458,27 @@ async fn get_project(
         id: p.id.as_uuid().to_string(),
         slug: p.slug,
         name: p.name,
+    }))
+}
+
+#[derive(Deserialize)]
+struct PatchProjectReq {
+    name: String,
+}
+
+async fn rename_project(
+    Auth(user): Auth,
+    State(app): State<AppState>,
+    Path((ws, proj)): Path<(String, String)>,
+    Json(req): Json<PatchProjectReq>,
+) -> ApiResult<Json<ProjectResp>> {
+    let (ws_id, _) = require_workspace_role(&app, user.user_id, &ws).await?;
+    let p = projects::get_by_slug(&app.db, ws_id, &proj).await?;
+    projects::rename(&app.db, p.id, &req.name).await?;
+    Ok(Json(ProjectResp {
+        id: p.id.as_uuid().to_string(),
+        slug: p.slug,
+        name: req.name,
     }))
 }
 
