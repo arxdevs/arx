@@ -167,6 +167,25 @@ pub async fn list_for_service_env(
     rows.iter().map(parse).collect()
 }
 
+pub async fn current_live(
+    pool: &SqlitePool,
+    service_id: ServiceId,
+    environment_id: EnvironmentId,
+) -> Result<Option<Deployment>> {
+    let row = sqlx::query(
+        "SELECT id, service_id, environment_id, status, image_ref, commit_sha,
+                variables_snapshot, container_id, error, created_at, finished_at
+         FROM deployments WHERE service_id = ? AND environment_id = ? AND status = 'live'
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(service_id.as_uuid().to_string())
+    .bind(environment_id.as_uuid().to_string())
+    .fetch_optional(pool)
+    .await
+    .map_err(map_sqlx)?;
+    row.map(|r| parse(&r)).transpose()
+}
+
 fn parse(row: &sqlx::sqlite::SqliteRow) -> Result<Deployment> {
     let id_str: String = row.try_get("id").map_err(map_sqlx)?;
     let sid: String = row.try_get("service_id").map_err(map_sqlx)?;

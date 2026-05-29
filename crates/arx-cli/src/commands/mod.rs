@@ -638,6 +638,20 @@ pub(crate) async fn dispatch(
                 .unwrap_or(Value::Null);
             print_value(&v, cli.json);
         }
+        Command::Restart { service } => {
+            let w = ws(cli.workspace.as_deref())?;
+            let p = pr(cli.project.as_deref())?;
+            let env = cli.env.unwrap_or_else(|| "production".into());
+            let v = client
+                .request(
+                    reqwest::Method::POST,
+                    &format!("/v1/workspaces/{w}/projects/{p}/services/{service}/restart"),
+                    Some(json!({"env": env})),
+                )
+                .await?
+                .unwrap_or(Value::Null);
+            print_value(&v, cli.json);
+        }
         Command::Config(ConfigCmd::Show { service }) => {
             let w = ws(cli.workspace.as_deref())?;
             let p = pr(cli.project.as_deref())?;

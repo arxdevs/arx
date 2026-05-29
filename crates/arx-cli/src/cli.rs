@@ -101,6 +101,11 @@ pub(crate) enum Command {
         deployment_id: String,
     },
 
+    /// Restart a service in place (re-run the current image, no rebuild).
+    Restart {
+        service: String,
+    },
+
     Deployments {
         service: String,
     },
