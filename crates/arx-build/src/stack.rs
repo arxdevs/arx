@@ -38,6 +38,7 @@ pub fn detect_stack(source_dir: &Path) -> Option<Box<dyn StackBuilder>> {
         crate::stacks::Node::detect,
         crate::stacks::Python::detect,
         crate::stacks::Go::detect,
+        crate::stacks::Rust::detect,
     ];
     detectors.iter().find_map(|f| f(source_dir))
 }

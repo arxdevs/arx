@@ -1304,32 +1304,38 @@ async fn restart_service(
     let env_slug = req.env.as_deref().unwrap_or("production");
     let e = environments::get_by_slug(&app.db, p.id, env_slug).await?;
 
-    if matches!(s.source, arx_core::model::ServiceSource::DbTemplate { .. }) {
-        return Err(ApiError::bad_request(
-            "restart on DB template not supported",
-        ));
-    }
-    let current = deployments::current_live(&app.db, s.id, e.id)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("service has no live deployment to restart"))?;
-    let image = current
-        .image_ref
-        .ok_or_else(|| ApiError::bad_request("live deployment has no image"))?;
+    let d = match &s.source {
+        arx_core::model::ServiceSource::DbTemplate { template, version } => {
+            // Re-deploy the template image. The named volume persists (data is
+            // retained) and credentials are reused, so this is a safe restart.
+            crate::db_template::deploy(&app, &w, &p, &s, &e, *template, version.as_deref()).await?
+        }
+        _ => {
+            let current = deployments::current_live(&app.db, s.id, e.id)
+                .await?
+                .ok_or_else(|| {
+                    ApiError::bad_request("service has no live deployment to restart")
+                })?;
+            let image = current
+                .image_ref
+                .ok_or_else(|| ApiError::bad_request("live deployment has no image"))?;
 
-    let d = crate::deploy::deploy_docker_image(
-        &app,
-        crate::deploy::DeployContext {
-            workspace: &w,
-            project: &p,
-            service: &s,
-            environment: &e,
-            existing_dep_id: None,
-            image,
-            extra_env: vec![],
-            extra_mounts: vec![],
-        },
-    )
-    .await?;
+            crate::deploy::deploy_docker_image(
+                &app,
+                crate::deploy::DeployContext {
+                    workspace: &w,
+                    project: &p,
+                    service: &s,
+                    environment: &e,
+                    existing_dep_id: None,
+                    image,
+                    extra_env: vec![],
+                    extra_mounts: vec![],
+                },
+            )
+            .await?
+        }
+    };
 
     let _ = arx_db::queries::audit::write(
         &app.db,

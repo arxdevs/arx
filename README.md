@@ -30,7 +30,7 @@ arx -w default -p demo domain add web web.your-domain
 arx -w default -p demo deploy web
 ```
 
-arx auto-detects the build stack (Gradle/Maven JVM, Node, Python, Go). If your repo has a `Dockerfile` at its root, arx uses it as-is. Override per service:
+arx auto-detects the build stack (Gradle/Maven JVM, Node, Python, Go, Rust). If your repo has a `Dockerfile` at its root, arx uses it as-is. Override per service:
 
 ```bash
 arx -w default -p demo service config set web \

@@ -209,6 +209,72 @@ pub fn parse_go_minor(s: &str) -> Result<(u8, u8), BuildError> {
     Ok((major, minor))
 }
 
+pub fn parse_rust_minor(s: &str) -> Result<(u8, u8), BuildError> {
+    let s = s.trim();
+    if s.len() > MAX_VERSION_LEN {
+        return Err(BuildError::InvalidInput {
+            field: "rust_version",
+            reason: "too long".into(),
+        });
+    }
+    if !version_re().is_match(s) {
+        return Err(BuildError::InvalidInput {
+            field: "rust_version",
+            reason: format!("not a version: {s:?}"),
+        });
+    }
+    let mut parts = s.split('.');
+    let major: u8 = parts
+        .next()
+        .unwrap_or("")
+        .parse()
+        .map_err(|_| BuildError::InvalidInput {
+            field: "rust_version",
+            reason: "parse major".into(),
+        })?;
+    let minor: u8 = parts
+        .next()
+        .unwrap_or("0")
+        .parse()
+        .map_err(|_| BuildError::InvalidInput {
+            field: "rust_version",
+            reason: "parse minor".into(),
+        })?;
+    if major != 1 {
+        return Err(BuildError::InvalidInput {
+            field: "rust_version",
+            reason: "unsupported major (expected 1.x)".into(),
+        });
+    }
+    Ok((major, minor))
+}
+
+const MAX_CARGO_NAME_LEN: usize = 128;
+
+fn cargo_name_re() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| Regex::new(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$").unwrap())
+}
+
+/// A Cargo package/binary name that is safe to embed in a Dockerfile `COPY
+/// /src/target/release/<name> ...` path. Cargo keeps hyphens in binary names,
+/// so they're allowed; anything that could break out of the path is rejected.
+pub fn validate_cargo_name(s: &str) -> Result<&str, BuildError> {
+    if s.is_empty() || s.len() > MAX_CARGO_NAME_LEN {
+        return Err(BuildError::InvalidInput {
+            field: "cargo_name",
+            reason: "length must be 1..=128".into(),
+        });
+    }
+    if !cargo_name_re().is_match(s) {
+        return Err(BuildError::InvalidInput {
+            field: "cargo_name",
+            reason: "must match [A-Za-z0-9_][A-Za-z0-9_-]*".into(),
+        });
+    }
+    Ok(s)
+}
+
 fn repo_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
@@ -496,6 +562,28 @@ mod tests {
         assert_eq!(parse_go_minor("1.22.3").unwrap(), (1, 22));
         assert!(parse_go_minor("2.0").is_err());
         assert!(parse_go_minor("1.5").is_err());
+    }
+
+    #[test]
+    fn rust_minor() {
+        assert_eq!(parse_rust_minor("1.85").unwrap(), (1, 85));
+        assert_eq!(parse_rust_minor("1.85.0").unwrap(), (1, 85));
+        assert_eq!(parse_rust_minor("1").unwrap(), (1, 0));
+        assert!(parse_rust_minor("2.0").is_err());
+        assert!(parse_rust_minor("1.85 && rm").is_err());
+        assert!(parse_rust_minor("stable").is_err());
+    }
+
+    #[test]
+    fn cargo_name() {
+        assert_eq!(validate_cargo_name("my-app").unwrap(), "my-app");
+        assert_eq!(validate_cargo_name("server_1").unwrap(), "server_1");
+        assert!(validate_cargo_name("").is_err());
+        assert!(validate_cargo_name("-leading").is_err());
+        assert!(validate_cargo_name("has space").is_err());
+        assert!(validate_cargo_name("../etc").is_err());
+        assert!(validate_cargo_name("a/b").is_err());
+        assert!(validate_cargo_name(&"x".repeat(129)).is_err());
     }
 
     #[test]
