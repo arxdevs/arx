@@ -9,6 +9,7 @@ mod error;
 mod login_cmd;
 mod server_cmd;
 mod setup_cmd;
+mod update_cmd;
 
 pub(crate) use credentials::{load_credentials, upsert_and_save};
 

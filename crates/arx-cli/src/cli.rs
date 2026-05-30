@@ -141,6 +141,13 @@ pub(crate) enum Command {
 
     #[command(subcommand)]
     Volume(VolumeCmd),
+
+    /// Update the arx CLI to the latest release (and the local daemon if installed).
+    Update {
+        /// Update only the CLI binary, skip the local daemon.
+        #[arg(long)]
+        cli_only: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

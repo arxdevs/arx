@@ -5,7 +5,7 @@ use crate::cli::{
 use crate::client::{Client, print_value, push_delete_query};
 use crate::credentials::{CredentialEntry, remove_credential, save_credentials, upsert_credential};
 use crate::error::CliError;
-use crate::{login_cmd, server_cmd, setup_cmd};
+use crate::{login_cmd, server_cmd, setup_cmd, update_cmd};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -1000,6 +1000,9 @@ pub(crate) async fn dispatch(
         }
         Command::Server(ServerCmd::Upgrade) => {
             server_cmd::upgrade(cli.quiet).await?;
+        }
+        Command::Update { cli_only } => {
+            update_cmd::run(cli.quiet, cli_only).await?;
         }
         Command::Server(ServerCmd::Status) => {
             server_cmd::status().await?;
