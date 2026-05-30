@@ -9,11 +9,12 @@ mod error;
 mod login_cmd;
 mod server_cmd;
 mod setup_cmd;
+mod update_check;
 mod update_cmd;
 
 pub(crate) use credentials::{load_credentials, upsert_and_save};
 
-use crate::cli::Cli;
+use crate::cli::{Cli, Command, ServerCmd};
 use crate::client::Client;
 use crate::credentials::{credentials_path, load_credentials as load_creds, resolve_target};
 use crate::error::{CliError, exit};
@@ -46,5 +47,18 @@ async fn run(cli: Cli) -> Result<()> {
         .unwrap_or_else(|_| (cli.server.clone(), None));
     let client = Client::new(server.clone(), token.clone());
 
-    commands::dispatch(cli, server, token, creds, cred_path, client).await
+    // Skip the background version notice for non-interactive/JSON output and for
+    // commands that already deal with versions (avoid double messaging).
+    let suppress_notice = cli.json
+        || cli.quiet
+        || matches!(
+            cli.cmd,
+            Command::Update { .. } | Command::Server(ServerCmd::Upgrade) | Command::Setup { .. }
+        );
+
+    let result = commands::dispatch(cli, server, token, creds, cred_path, client).await;
+    if result.is_ok() && !suppress_notice {
+        update_check::notify().await;
+    }
+    result
 }
