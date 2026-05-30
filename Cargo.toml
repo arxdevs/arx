@@ -87,6 +87,11 @@ quick-xml = "0.36"
 semver = "1"
 globset = "0.4"
 
+# CLI self-update (download + extract + replace running binary)
+flate2 = "1"
+tar = "0.4"
+self-replace = "1"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

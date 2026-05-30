@@ -105,6 +105,14 @@ arx whoami
 
 Expected output: JSON with the user's `github_login`. Report success or failure.
 
+## Updating
+
+```bash
+arx update
+```
+
+On a server box this updates the `arx` CLI to the latest release and then upgrades the local daemon (`docker compose pull` + `up -d`). On a client box (no local daemon) it updates only the CLI. Pass `--cli-only` to skip the daemon step, or `ARX_VERSION=vX.Y.Z` to pin a release. The CLI also prints a one-line notice when a newer release is available; set `ARX_NO_UPDATE_CHECK=1` to silence it.
+
 ## Things the agent must not do
 
 - Do not edit `~/.bashrc`, `~/.zshrc`, `~/.profile`, or any shell rc file without explicit consent.
@@ -116,7 +124,8 @@ Expected output: JSON with the user's `github_login`. Report success or failure.
 ## Environment variables
 
 - `ARX_BIN_DIR` — override install destination. Set only if the user picked a non-default path in question 2.
-- `ARX_VERSION` — pin a specific release tag. Set only if the user explicitly requested a version.
+- `ARX_VERSION` — pin a specific release tag. Used by both the installer and `arx update`. Set only if the user explicitly requested a version.
+- `ARX_NO_UPDATE_CHECK` — set to any value to disable the "new version available" notice.
 
 ## Uninstall
 
