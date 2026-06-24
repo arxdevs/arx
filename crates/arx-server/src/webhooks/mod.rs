@@ -82,7 +82,15 @@ pub async fn emit_deploy_started(app: &AppState, ctx: &DeployEventCtx, trigger: 
         "service": ctx.service_slug,
         "environment": ctx.environment_slug,
     });
-    emit(app, ctx.workspace_id, Some(ctx.project_id), &ctx.workspace_slug, event_type, data).await;
+    emit(
+        app,
+        ctx.workspace_id,
+        Some(ctx.project_id),
+        &ctx.workspace_slug,
+        event_type,
+        data,
+    )
+    .await;
 }
 
 /// Emits the terminal event for a deploy/restart/rollback based on its result.
@@ -105,7 +113,15 @@ pub async fn emit_deploy_terminal(
         "status": if succeeded { "live" } else { "failed" },
         "reason": reason,
     });
-    emit(app, ctx.workspace_id, Some(ctx.project_id), &ctx.workspace_slug, event_type, data).await;
+    emit(
+        app,
+        ctx.workspace_id,
+        Some(ctx.project_id),
+        &ctx.workspace_slug,
+        event_type,
+        data,
+    )
+    .await;
 }
 
 /// Emits a backup event for a service, resolving its project + workspace for
@@ -123,14 +139,14 @@ pub async fn emit_backup_for_service(
             return;
         }
     };
-    let workspace = match arx_db::queries::workspaces::get_by_id(&app.db, project.workspace_id).await
-    {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::warn!(error = %e, "webhook emit_backup: workspace lookup failed");
-            return;
-        }
-    };
+    let workspace =
+        match arx_db::queries::workspaces::get_by_id(&app.db, project.workspace_id).await {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!(error = %e, "webhook emit_backup: workspace lookup failed");
+                return;
+            }
+        };
     let event_type = if succeeded {
         "backup.succeeded"
     } else {
@@ -169,14 +185,8 @@ pub async fn emit_test(
         data: serde_json::json!({ "message": "arx outgoing webhook test event" }),
     };
     let body = serde_json::to_string(&envelope).ok()?;
-    match arx_db::queries::webhooks::create_pending(
-        &app.db,
-        endpoint_id,
-        &event_id,
-        "test",
-        &body,
-    )
-    .await
+    match arx_db::queries::webhooks::create_pending(&app.db, endpoint_id, &event_id, "test", &body)
+        .await
     {
         Ok(id) => Some(id),
         Err(e) => {

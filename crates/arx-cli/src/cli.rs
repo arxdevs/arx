@@ -175,9 +175,7 @@ pub(crate) enum WebhookCmd {
     },
 
     /// Show one endpoint.
-    Show {
-        id: String,
-    },
+    Show { id: String },
 
     /// Update an endpoint's url, events, or active state.
     Update {
@@ -191,30 +189,19 @@ pub(crate) enum WebhookCmd {
     },
 
     /// Delete an endpoint.
-    Delete {
-        id: String,
-    },
+    Delete { id: String },
 
     /// Re-enable an auto-disabled endpoint.
-    Enable {
-        id: String,
-    },
+    Enable { id: String },
 
     /// Send a test event to an endpoint.
-    Test {
-        id: String,
-    },
+    Test { id: String },
 
     /// List recent delivery attempts for an endpoint.
-    Deliveries {
-        id: String,
-    },
+    Deliveries { id: String },
 
     /// Re-queue a past delivery for another attempt.
-    Redeliver {
-        id: String,
-        delivery_id: String,
-    },
+    Redeliver { id: String, delivery_id: String },
 }
 
 #[derive(Debug, Subcommand)]

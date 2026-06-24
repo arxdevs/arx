@@ -124,24 +124,27 @@ async fn deliver_one(app: &AppState, client: &reqwest::Client, delivery: Webhook
         }
     };
 
-    let credentials =
-        match arx_db::queries::webhooks::credentials_for(&app.db, &app.master_key, endpoint.id)
-            .await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(error = %e, endpoint = %endpoint.id.as_uuid(), "webhook deliver: credential decrypt failed");
-                let _ = arx_db::queries::webhooks::mark_retryable(
-                    &app.db,
-                    delivery.id,
-                    next_attempt_at(delivery.attempts),
-                    None,
-                    "credential_error",
-                )
-                .await;
-                return;
-            }
-        };
+    let credentials = match arx_db::queries::webhooks::credentials_for(
+        &app.db,
+        &app.master_key,
+        endpoint.id,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(error = %e, endpoint = %endpoint.id.as_uuid(), "webhook deliver: credential decrypt failed");
+            let _ = arx_db::queries::webhooks::mark_retryable(
+                &app.db,
+                delivery.id,
+                next_attempt_at(delivery.attempts),
+                None,
+                "credential_error",
+            )
+            .await;
+            return;
+        }
+    };
 
     let outcome = transport
         .deliver(
@@ -189,7 +192,7 @@ async fn deliver_one(app: &AppState, client: &reqwest::Client, delivery: Webhook
             // attempts is the count *before* this attempt; the next failed
             // attempt number is attempts + 1.
             let attempt_just_failed = delivery.attempts + 1;
-            if (attempt_just_failed as usize) >= BACKOFF_SECONDS.len() + 1 {
+            if (attempt_just_failed as usize) > BACKOFF_SECONDS.len() {
                 // Exhausted the retry schedule.
                 let _ = arx_db::queries::webhooks::mark_exhausted(
                     &app.db,
@@ -220,7 +223,10 @@ fn next_attempt_at(attempts_before: i64) -> chrono::DateTime<Utc> {
     Utc::now() + ChronoDuration::seconds(BACKOFF_SECONDS[idx])
 }
 
-async fn record_failure_and_maybe_disable(app: &AppState, endpoint_id: arx_core::ids::WebhookEndpointId) {
+async fn record_failure_and_maybe_disable(
+    app: &AppState,
+    endpoint_id: arx_core::ids::WebhookEndpointId,
+) {
     match arx_db::queries::webhooks::record_failure(&app.db, endpoint_id).await {
         Ok((count, first_failure_at)) => {
             let window_ok = first_failure_at

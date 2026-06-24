@@ -1114,7 +1114,11 @@ pub(crate) async fn dispatch(
             let w = ws(cli.workspace.as_deref())?;
             let mut body = json!({ "url": url });
             if let Some(ev) = events {
-                let list: Vec<&str> = ev.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                let list: Vec<&str> = ev
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect();
                 body["events"] = json!(list);
             }
             if let Some(p) = project {
@@ -1160,7 +1164,11 @@ pub(crate) async fn dispatch(
                 body["url"] = json!(u);
             }
             if let Some(ev) = events {
-                let list: Vec<&str> = ev.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                let list: Vec<&str> = ev
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect();
                 body["events"] = json!(list);
             }
             if let Some(a) = active {

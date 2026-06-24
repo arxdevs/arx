@@ -135,7 +135,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/workspaces/:ws/webhooks/:id",
             get(get_webhook).patch(patch_webhook).delete(delete_webhook),
         )
-        .route("/v1/workspaces/:ws/webhooks/:id/enable", post(enable_webhook))
+        .route(
+            "/v1/workspaces/:ws/webhooks/:id/enable",
+            post(enable_webhook),
+        )
         .route("/v1/workspaces/:ws/webhooks/:id/test", post(test_webhook))
         .route(
             "/v1/workspaces/:ws/webhooks/:id/deliveries",
@@ -1713,7 +1716,9 @@ async fn list_webhooks(
 ) -> ApiResult<Json<Vec<WebhookEndpointResp>>> {
     let ws_id = require_admin(&app, user.user_id, &ws).await?;
     let eps = arx_db::queries::webhooks::list_in_workspace(&app.db, ws_id).await?;
-    Ok(Json(eps.into_iter().map(WebhookEndpointResp::from).collect()))
+    Ok(Json(
+        eps.into_iter().map(WebhookEndpointResp::from).collect(),
+    ))
 }
 
 async fn create_webhook(
@@ -1773,11 +1778,9 @@ async fn load_owned_endpoint(
     id: &str,
 ) -> ApiResult<arx_core::model::WebhookEndpoint> {
     let uuid = uuid::Uuid::parse_str(id).map_err(|_| ApiError::bad_request("bad webhook id"))?;
-    let ep = arx_db::queries::webhooks::get(
-        &app.db,
-        arx_core::ids::WebhookEndpointId::from_uuid(uuid),
-    )
-    .await?;
+    let ep =
+        arx_db::queries::webhooks::get(&app.db, arx_core::ids::WebhookEndpointId::from_uuid(uuid))
+            .await?;
     if ep.workspace_id != ws_id {
         return Err(ApiError::not_found());
     }
@@ -1917,7 +1920,10 @@ async fn list_webhook_deliveries(
     let ep = load_owned_endpoint(&app, ws_id, &id).await?;
     let deliveries = arx_db::queries::webhooks::list_for_endpoint(&app.db, ep.id, 100).await?;
     Ok(Json(
-        deliveries.into_iter().map(WebhookDeliveryResp::from).collect(),
+        deliveries
+            .into_iter()
+            .map(WebhookDeliveryResp::from)
+            .collect(),
     ))
 }
 
@@ -1953,8 +1959,8 @@ fn generate_secret() -> String {
 /// outbound traffic (these are admin-only already; this caps accidental loops).
 fn rate_limit(key: String) -> ApiResult<()> {
     use std::collections::HashMap;
-    use std::sync::OnceLock;
     use std::sync::Mutex;
+    use std::sync::OnceLock;
     use std::time::Instant;
     static LAST: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
     const MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);

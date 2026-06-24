@@ -4,8 +4,8 @@ use arx_core::ids::{ProjectId, WebhookDeliveryId, WebhookEndpointId, WorkspaceId
 use arx_core::model::{DeliveryStatus, WebhookDelivery, WebhookEndpoint};
 use arx_core::{Error, Result};
 use chrono::{DateTime, Utc};
-use sqlx::{Row, SqlitePool};
 use sqlx::sqlite::SqliteRow;
+use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -115,11 +115,7 @@ pub async fn list_active_for_event(
     let mut out = Vec::new();
     for row in &rows {
         let ep = parse_endpoint(row)?;
-        if ep
-            .events
-            .iter()
-            .any(|e| e == "*" || e == event_type)
-        {
+        if ep.events.iter().any(|e| e == "*" || e == event_type) {
             out.push(ep);
         }
     }
@@ -157,22 +153,26 @@ pub async fn update(
     }
     if let Some(ev) = events {
         let ev_str = serde_json::to_string(ev).map_err(|e| Error::Internal(e.to_string()))?;
-        sqlx::query("UPDATE outgoing_webhook_endpoints SET events = ?, updated_at = ? WHERE id = ?")
-            .bind(&ev_str)
-            .bind(&now)
-            .bind(id.as_uuid().to_string())
-            .execute(pool)
-            .await
-            .map_err(map_sqlx)?;
+        sqlx::query(
+            "UPDATE outgoing_webhook_endpoints SET events = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&ev_str)
+        .bind(&now)
+        .bind(id.as_uuid().to_string())
+        .execute(pool)
+        .await
+        .map_err(map_sqlx)?;
     }
     if let Some(a) = active {
-        sqlx::query("UPDATE outgoing_webhook_endpoints SET active = ?, updated_at = ? WHERE id = ?")
-            .bind(if a { 1 } else { 0 })
-            .bind(&now)
-            .bind(id.as_uuid().to_string())
-            .execute(pool)
-            .await
-            .map_err(map_sqlx)?;
+        sqlx::query(
+            "UPDATE outgoing_webhook_endpoints SET active = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(if a { 1 } else { 0 })
+        .bind(&now)
+        .bind(id.as_uuid().to_string())
+        .execute(pool)
+        .await
+        .map_err(map_sqlx)?;
     }
     if let Some(pid) = project_id {
         sqlx::query(
@@ -761,7 +761,9 @@ mod tests {
         let dead = create_pending(&c.pool, id, "evt_dead", "test", "{}")
             .await
             .unwrap();
-        mark_exhausted(&c.pool, dead, Some(500), "boom").await.unwrap();
+        mark_exhausted(&c.pool, dead, Some(500), "boom")
+            .await
+            .unwrap();
 
         // Prune everything created before "now + 1d": the live (non-exhausted)
         // row goes, the dead-letter stays.

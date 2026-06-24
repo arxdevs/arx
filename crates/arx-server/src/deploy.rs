@@ -62,7 +62,14 @@ async fn deploy_with_optional_id(
         service,
         environment,
         arx_core::model::DeployTrigger::Deploy,
-        deploy_inner(app, workspace, project, service, environment, existing_dep_id),
+        deploy_inner(
+            app,
+            workspace,
+            project,
+            service,
+            environment,
+            existing_dep_id,
+        ),
     )
     .await
 }
@@ -111,10 +118,7 @@ pub(crate) async fn run_with_events(
     // Guard against a panic in the deploy future leaving `started` with no
     // terminal event: emit `failed`, then resume the panic so existing
     // behaviour (task abort) is unchanged.
-    let result = match std::panic::AssertUnwindSafe(fut)
-        .catch_unwind()
-        .await
-    {
+    let result = match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
         Ok(r) => r,
         Err(panic) => {
             crate::webhooks::emit_deploy_terminal(
