@@ -587,3 +587,188 @@ fn parse_opt_time(s: Option<String>) -> Result<Option<DateTime<Utc>>> {
         None => Ok(None),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::MasterKey;
+    use crate::pool::connect;
+
+    struct Ctx {
+        pool: SqlitePool,
+        key: MasterKey,
+        ws: WorkspaceId,
+        _dir: &'static tempfile::TempDir,
+    }
+
+    async fn ctx() -> Ctx {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = Box::leak(Box::new(tmp));
+        let pool = connect(&dir.path().join("test.db")).await.unwrap();
+        let key = MasterKey::load_or_create(&dir.path().join("master.key")).unwrap();
+        let user = crate::queries::auth::create_local_user(&pool, "tester")
+            .await
+            .unwrap();
+        let ws = crate::queries::workspaces::create(&pool, "ws", "WS", user)
+            .await
+            .unwrap();
+        Ctx {
+            pool,
+            key,
+            ws: ws.id,
+            _dir: dir,
+        }
+    }
+
+    async fn make_endpoint(c: &Ctx, events: &[&str]) -> WebhookEndpointId {
+        let events: Vec<String> = events.iter().map(|s| s.to_string()).collect();
+        let ep = create(
+            &c.pool,
+            &c.key,
+            c.ws,
+            None,
+            "webhook",
+            "https://example.com/hook",
+            &serde_json::json!({}),
+            &serde_json::json!({ "signing_secret": "shh" }),
+            &events,
+        )
+        .await
+        .unwrap();
+        ep.id
+    }
+
+    #[tokio::test]
+    async fn credential_roundtrip() {
+        let c = ctx().await;
+        let id = make_endpoint(&c, &["*"]).await;
+        let creds = credentials_for(&c.pool, &c.key, id).await.unwrap();
+        assert_eq!(creds["signing_secret"], "shh");
+    }
+
+    #[tokio::test]
+    async fn list_active_for_event_matches_exactly_and_wildcard() {
+        let c = ctx().await;
+        let wild = make_endpoint(&c, &["*"]).await;
+        let exact = make_endpoint(&c, &["deployment.failed"]).await;
+        let _other = make_endpoint(&c, &["backup.succeeded"]).await;
+
+        let got = list_active_for_event(&c.pool, c.ws, None, "deployment.failed")
+            .await
+            .unwrap();
+        let ids: Vec<_> = got.iter().map(|e| e.id).collect();
+        assert!(ids.contains(&wild), "wildcard endpoint should match");
+        assert!(ids.contains(&exact), "exact-match endpoint should match");
+        assert_eq!(ids.len(), 2, "non-matching endpoint must be excluded");
+
+        // Substring traps: a subscriber to `deployment.fail` must NOT match
+        // `deployment.failed`.
+        let near = make_endpoint(&c, &["deployment.fail"]).await;
+        let got = list_active_for_event(&c.pool, c.ws, None, "deployment.failed")
+            .await
+            .unwrap();
+        assert!(
+            !got.iter().any(|e| e.id == near),
+            "substring must not falsely match"
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_endpoint_excluded() {
+        let c = ctx().await;
+        let id = make_endpoint(&c, &["*"]).await;
+        disable(&c.pool, id, "test").await.unwrap();
+        let got = list_active_for_event(&c.pool, c.ws, None, "anything")
+            .await
+            .unwrap();
+        assert!(got.is_empty());
+        // enable() restores it and clears the failure counters.
+        enable(&c.pool, id).await.unwrap();
+        let got = list_active_for_event(&c.pool, c.ws, None, "anything")
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn claim_due_is_atomic_no_double_claim() {
+        let c = ctx().await;
+        let id = make_endpoint(&c, &["*"]).await;
+        let _d1 = create_pending(&c.pool, id, "evt_1", "test", "{}")
+            .await
+            .unwrap();
+        let _d2 = create_pending(&c.pool, id, "evt_2", "test", "{}")
+            .await
+            .unwrap();
+
+        let now = Utc::now();
+        let first = claim_due(&c.pool, now, 60, 10).await.unwrap();
+        assert_eq!(first.len(), 2, "both due deliveries claimed");
+        // A second claim finds nothing (they are in_flight, not pending).
+        let second = claim_due(&c.pool, now, 60, 10).await.unwrap();
+        assert!(second.is_empty(), "claimed rows must not be re-claimed");
+    }
+
+    #[tokio::test]
+    async fn reclaim_expired_returns_in_flight_to_pending() {
+        let c = ctx().await;
+        let id = make_endpoint(&c, &["*"]).await;
+        create_pending(&c.pool, id, "evt_1", "test", "{}")
+            .await
+            .unwrap();
+
+        // Claim with a lease that is already expired relative to a future "now".
+        let now = Utc::now();
+        let claimed = claim_due(&c.pool, now, 1, 10).await.unwrap();
+        assert_eq!(claimed.len(), 1);
+
+        // No reclaim before the lease expires.
+        let n = reclaim_expired(&c.pool, now).await.unwrap();
+        assert_eq!(n, 0);
+        // After the lease window, the row is reclaimed.
+        let n = reclaim_expired(&c.pool, now + chrono::Duration::seconds(5))
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        let due = claim_due(&c.pool, now + chrono::Duration::seconds(5), 60, 10)
+            .await
+            .unwrap();
+        assert_eq!(due.len(), 1, "reclaimed delivery is claimable again");
+    }
+
+    #[tokio::test]
+    async fn record_failure_then_success_resets_streak() {
+        let c = ctx().await;
+        let id = make_endpoint(&c, &["*"]).await;
+        let (n1, first) = record_failure(&c.pool, id).await.unwrap();
+        assert_eq!(n1, 1);
+        assert!(first.is_some(), "first_failure_at set on first failure");
+        let (n2, _) = record_failure(&c.pool, id).await.unwrap();
+        assert_eq!(n2, 2);
+        record_success(&c.pool, id).await.unwrap();
+        let ep = get(&c.pool, id).await.unwrap();
+        assert_eq!(ep.consecutive_failures, 0);
+        assert!(ep.first_failure_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn prune_keeps_dead_letters() {
+        let c = ctx().await;
+        let id = make_endpoint(&c, &["*"]).await;
+        let live = create_pending(&c.pool, id, "evt_live", "test", "{}")
+            .await
+            .unwrap();
+        let dead = create_pending(&c.pool, id, "evt_dead", "test", "{}")
+            .await
+            .unwrap();
+        mark_exhausted(&c.pool, dead, Some(500), "boom").await.unwrap();
+
+        // Prune everything created before "now + 1d": the live (non-exhausted)
+        // row goes, the dead-letter stays.
+        let cutoff = Utc::now() + chrono::Duration::days(1);
+        let removed = prune_old(&c.pool, cutoff).await.unwrap();
+        assert_eq!(removed, 1);
+        assert!(get_delivery(&c.pool, live).await.is_err());
+        assert!(get_delivery(&c.pool, dead).await.is_ok());
+    }
+}
