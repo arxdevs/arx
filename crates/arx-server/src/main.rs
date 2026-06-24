@@ -16,6 +16,7 @@ mod state;
 mod supervisor;
 mod var_resolve;
 mod volumes;
+mod webhooks;
 
 use anyhow::Context;
 use arx_core::config::Config;
@@ -117,6 +118,8 @@ async fn main() -> anyhow::Result<()> {
     cert_poll::spawn(state.clone());
     backups::spawn_scheduler(state.clone());
     audit_pruner::spawn(state.clone());
+    webhooks::spawn_worker(state.clone());
+    webhooks::spawn_pruner(state.clone());
 
     let app = api::router(state.clone()).layer(TraceLayer::new_for_http());
 

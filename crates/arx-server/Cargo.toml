@@ -44,6 +44,8 @@ async-trait = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
+hex = "0.4"
 hickory-resolver = "0.24"
 globset = { workspace = true }
 croner = "3.0.1"
