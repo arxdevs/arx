@@ -142,11 +142,78 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Volume(VolumeCmd),
 
+    /// Manage outgoing webhooks: send signed event notifications to external URLs.
+    #[command(subcommand)]
+    Webhook(WebhookCmd),
+
     /// Update the arx CLI to the latest release (and the local daemon if installed).
     Update {
         /// Update only the CLI binary, skip the local daemon.
         #[arg(long)]
         cli_only: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum WebhookCmd {
+    /// List outgoing webhook endpoints in the workspace.
+    List,
+
+    /// Create an endpoint. Prints the signing secret once.
+    Create {
+        #[arg(long)]
+        url: String,
+        /// Comma-separated event types to subscribe to; omit for all.
+        #[arg(long)]
+        events: Option<String>,
+        /// Scope the endpoint to a single project (slug).
+        #[arg(long)]
+        project: Option<String>,
+        /// Provide your own signing secret instead of generating one.
+        #[arg(long)]
+        secret: Option<String>,
+    },
+
+    /// Show one endpoint.
+    Show {
+        id: String,
+    },
+
+    /// Update an endpoint's url, events, or active state.
+    Update {
+        id: String,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        events: Option<String>,
+        #[arg(long)]
+        active: Option<bool>,
+    },
+
+    /// Delete an endpoint.
+    Delete {
+        id: String,
+    },
+
+    /// Re-enable an auto-disabled endpoint.
+    Enable {
+        id: String,
+    },
+
+    /// Send a test event to an endpoint.
+    Test {
+        id: String,
+    },
+
+    /// List recent delivery attempts for an endpoint.
+    Deliveries {
+        id: String,
+    },
+
+    /// Re-queue a past delivery for another attempt.
+    Redeliver {
+        id: String,
+        delivery_id: String,
     },
 }
 
