@@ -1125,7 +1125,16 @@ async fn backup_now(
 ) -> ApiResult<Json<BackupResp>> {
     let (_, _) = require_workspace_role(&app, user.user_id, &ws).await?;
     let (_, _, s) = resolve_wps(&app, &ws, &proj, &svc).await?;
-    let r = crate::backups::backup_now(&app, &s).await?;
+    let r = match crate::backups::backup_now(&app, &s).await {
+        Ok(r) => {
+            crate::webhooks::emit_backup_for_service(&app, &s, true, None).await;
+            r
+        }
+        Err(e) => {
+            crate::webhooks::emit_backup_for_service(&app, &s, false, Some("backup_failed")).await;
+            return Err(e);
+        }
+    };
     Ok(Json(BackupResp {
         id: r.id.to_string(),
         size_bytes: r.size_bytes,
@@ -1241,18 +1250,26 @@ async fn rollback_service(
     let d = match &s.source {
         arx_core::model::ServiceSource::DockerImage { .. }
         | arx_core::model::ServiceSource::GitSource { .. } => {
-            crate::deploy::deploy_docker_image(
+            crate::deploy::run_with_events(
                 &app,
-                crate::deploy::DeployContext {
-                    workspace: &w,
-                    project: &p,
-                    service: &s,
-                    environment: &e,
-                    existing_dep_id: None,
-                    image,
-                    extra_env: vec![],
-                    extra_mounts: vec![],
-                },
+                &w,
+                &p,
+                &s,
+                &e,
+                arx_core::model::DeployTrigger::Rollback,
+                crate::deploy::deploy_docker_image(
+                    &app,
+                    crate::deploy::DeployContext {
+                        workspace: &w,
+                        project: &p,
+                        service: &s,
+                        environment: &e,
+                        existing_dep_id: None,
+                        image,
+                        extra_env: vec![],
+                        extra_mounts: vec![],
+                    },
+                ),
             )
             .await?
         }
@@ -1308,7 +1325,16 @@ async fn restart_service(
         arx_core::model::ServiceSource::DbTemplate { template, version } => {
             // Re-deploy the template image. The named volume persists (data is
             // retained) and credentials are reused, so this is a safe restart.
-            crate::db_template::deploy(&app, &w, &p, &s, &e, *template, version.as_deref()).await?
+            crate::deploy::run_with_events(
+                &app,
+                &w,
+                &p,
+                &s,
+                &e,
+                arx_core::model::DeployTrigger::Restart,
+                crate::db_template::deploy(&app, &w, &p, &s, &e, *template, version.as_deref()),
+            )
+            .await?
         }
         _ => {
             let current = deployments::current_live(&app.db, s.id, e.id)
@@ -1320,18 +1346,26 @@ async fn restart_service(
                 .image_ref
                 .ok_or_else(|| ApiError::bad_request("live deployment has no image"))?;
 
-            crate::deploy::deploy_docker_image(
+            crate::deploy::run_with_events(
                 &app,
-                crate::deploy::DeployContext {
-                    workspace: &w,
-                    project: &p,
-                    service: &s,
-                    environment: &e,
-                    existing_dep_id: None,
-                    image,
-                    extra_env: vec![],
-                    extra_mounts: vec![],
-                },
+                &w,
+                &p,
+                &s,
+                &e,
+                arx_core::model::DeployTrigger::Restart,
+                crate::deploy::deploy_docker_image(
+                    &app,
+                    crate::deploy::DeployContext {
+                        workspace: &w,
+                        project: &p,
+                        service: &s,
+                        environment: &e,
+                        existing_dep_id: None,
+                        image,
+                        extra_env: vec![],
+                        extra_mounts: vec![],
+                    },
+                ),
             )
             .await?
         }
