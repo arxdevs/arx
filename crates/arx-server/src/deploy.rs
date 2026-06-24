@@ -10,6 +10,7 @@ use arx_docker::{
     ContainerEngine, ContainerSpec, Mount, PortBinding, Protocol, ResourceLimits, RestartPolicy,
 };
 use arx_traefik::{BackendTarget, Route};
+use futures::FutureExt;
 use std::collections::HashMap;
 use std::time::Duration;
 use tracing::{error, info, warn};
@@ -47,6 +48,119 @@ pub async fn deploy_with_existing(
 }
 
 async fn deploy_with_optional_id(
+    app: &AppState,
+    workspace: &Workspace,
+    project: &Project,
+    service: &Service,
+    environment: &Environment,
+    existing_dep_id: Option<arx_core::ids::DeploymentId>,
+) -> ApiResult<Deployment> {
+    run_with_events(
+        app,
+        workspace,
+        project,
+        service,
+        environment,
+        arx_core::model::DeployTrigger::Deploy,
+        deploy_inner(
+            app,
+            workspace,
+            project,
+            service,
+            environment,
+            existing_dep_id,
+        ),
+    )
+    .await
+}
+
+/// Builds the slug-only event context for outgoing webhook emission.
+pub(crate) fn event_ctx(
+    workspace: &Workspace,
+    project: &Project,
+    service: &Service,
+    environment: &Environment,
+) -> crate::webhooks::DeployEventCtx {
+    crate::webhooks::DeployEventCtx {
+        workspace_id: workspace.id,
+        workspace_slug: workspace.slug.clone(),
+        project_id: project.id,
+        project_slug: project.slug.clone(),
+        service_slug: service.slug.clone(),
+        environment_slug: environment.slug.clone(),
+    }
+}
+
+/// Maps an `ApiError` to a coarse, secret-free failure reason for webhook
+/// payloads. Never includes raw error text (which can carry build/git/docker
+/// stderr and thus secrets).
+pub(crate) fn classify_failure(err: &ApiError) -> &'static str {
+    match err.0 {
+        axum::http::StatusCode::BAD_REQUEST => "invalid_request",
+        _ => "deploy_failed",
+    }
+}
+
+/// Wraps a deploy future with terminal-or-nothing outgoing-webhook emission:
+/// emits `started` before, then exactly one terminal event from the result.
+/// Emission is fire-and-forget and never alters the deploy result.
+pub(crate) async fn run_with_events(
+    app: &AppState,
+    workspace: &Workspace,
+    project: &Project,
+    service: &Service,
+    environment: &Environment,
+    trigger: arx_core::model::DeployTrigger,
+    fut: impl std::future::Future<Output = ApiResult<Deployment>>,
+) -> ApiResult<Deployment> {
+    let ctx = event_ctx(workspace, project, service, environment);
+    crate::webhooks::emit_deploy_started(app, &ctx, trigger).await;
+    // Guard against a panic in the deploy future leaving `started` with no
+    // terminal event: emit `failed`, then resume the panic so existing
+    // behaviour (task abort) is unchanged.
+    let result = match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
+        Ok(r) => r,
+        Err(panic) => {
+            crate::webhooks::emit_deploy_terminal(
+                app,
+                &ctx,
+                trigger,
+                None,
+                false,
+                Some("panicked"),
+            )
+            .await;
+            std::panic::resume_unwind(panic);
+        }
+    };
+    match &result {
+        Ok(d) => {
+            crate::webhooks::emit_deploy_terminal(
+                app,
+                &ctx,
+                trigger,
+                Some(&d.id.as_uuid().to_string()),
+                true,
+                None,
+            )
+            .await;
+        }
+        Err(e) => {
+            crate::webhooks::emit_deploy_terminal(
+                app,
+                &ctx,
+                trigger,
+                None,
+                false,
+                Some(classify_failure(e)),
+            )
+            .await;
+        }
+    }
+    result
+}
+
+async fn deploy_inner(
     app: &AppState,
     workspace: &Workspace,
     project: &Project,

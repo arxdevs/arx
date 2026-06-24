@@ -11,6 +11,7 @@ pub mod service_env;
 pub mod services;
 pub mod settings;
 pub mod variables;
+pub mod webhooks;
 pub mod workspaces;
 
 use arx_core::{Error, Result};

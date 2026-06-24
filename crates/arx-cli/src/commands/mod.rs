@@ -1,6 +1,6 @@
 use crate::cli::{
     BackupCmd, Cli, Command, ConfigCmd, DomainCmd, EnvironmentCmd, ProjectCmd, ServerCertCmd,
-    ServerCmd, ServerConfigCmd, ServiceCmd, VarCmd, VolumeCmd, WorkspaceCmd,
+    ServerCmd, ServerConfigCmd, ServiceCmd, VarCmd, VolumeCmd, WebhookCmd, WorkspaceCmd,
 };
 use crate::client::{Client, print_value, push_delete_query};
 use crate::credentials::{CredentialEntry, remove_credential, save_credentials, upsert_credential};
@@ -1091,6 +1091,160 @@ pub(crate) async fn dispatch(
                 eprintln!("dry-run: pass --execute to actually remove");
             }
             print_value(&v, cli.json);
+        }
+
+        Command::Webhook(WebhookCmd::List) => {
+            let w = ws(cli.workspace.as_deref())?;
+            let v = client
+                .request(
+                    reqwest::Method::GET,
+                    &format!("/v1/workspaces/{w}/webhooks"),
+                    None,
+                )
+                .await?
+                .unwrap_or(Value::Null);
+            print_value(&v, cli.json);
+        }
+        Command::Webhook(WebhookCmd::Create {
+            url,
+            events,
+            project,
+            secret,
+        }) => {
+            let w = ws(cli.workspace.as_deref())?;
+            let mut body = json!({ "url": url });
+            if let Some(ev) = events {
+                let list: Vec<&str> = ev
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                body["events"] = json!(list);
+            }
+            if let Some(p) = project {
+                body["project"] = json!(p);
+            }
+            if let Some(s) = secret {
+                body["secret"] = json!(s);
+            }
+            let v = client
+                .request(
+                    reqwest::Method::POST,
+                    &format!("/v1/workspaces/{w}/webhooks"),
+                    Some(body),
+                )
+                .await?
+                .unwrap_or(Value::Null);
+            if !cli.quiet && !cli.json {
+                eprintln!("Save the signing secret now; it is not shown again.");
+            }
+            print_value(&v, cli.json);
+        }
+        Command::Webhook(WebhookCmd::Show { id }) => {
+            let w = ws(cli.workspace.as_deref())?;
+            let v = client
+                .request(
+                    reqwest::Method::GET,
+                    &format!("/v1/workspaces/{w}/webhooks/{id}"),
+                    None,
+                )
+                .await?
+                .unwrap_or(Value::Null);
+            print_value(&v, cli.json);
+        }
+        Command::Webhook(WebhookCmd::Update {
+            id,
+            url,
+            events,
+            active,
+        }) => {
+            let w = ws(cli.workspace.as_deref())?;
+            let mut body = json!({});
+            if let Some(u) = url {
+                body["url"] = json!(u);
+            }
+            if let Some(ev) = events {
+                let list: Vec<&str> = ev
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                body["events"] = json!(list);
+            }
+            if let Some(a) = active {
+                body["active"] = json!(a);
+            }
+            let v = client
+                .request(
+                    reqwest::Method::PATCH,
+                    &format!("/v1/workspaces/{w}/webhooks/{id}"),
+                    Some(body),
+                )
+                .await?
+                .unwrap_or(Value::Null);
+            print_value(&v, cli.json);
+        }
+        Command::Webhook(WebhookCmd::Delete { id }) => {
+            let w = ws(cli.workspace.as_deref())?;
+            client
+                .request(
+                    reqwest::Method::DELETE,
+                    &format!("/v1/workspaces/{w}/webhooks/{id}"),
+                    None,
+                )
+                .await?;
+            if !cli.quiet {
+                eprintln!("deleted webhook {id}");
+            }
+        }
+        Command::Webhook(WebhookCmd::Enable { id }) => {
+            let w = ws(cli.workspace.as_deref())?;
+            let v = client
+                .request(
+                    reqwest::Method::POST,
+                    &format!("/v1/workspaces/{w}/webhooks/{id}/enable"),
+                    None,
+                )
+                .await?
+                .unwrap_or(Value::Null);
+            print_value(&v, cli.json);
+        }
+        Command::Webhook(WebhookCmd::Test { id }) => {
+            let w = ws(cli.workspace.as_deref())?;
+            let v = client
+                .request(
+                    reqwest::Method::POST,
+                    &format!("/v1/workspaces/{w}/webhooks/{id}/test"),
+                    None,
+                )
+                .await?
+                .unwrap_or(Value::Null);
+            print_value(&v, cli.json);
+        }
+        Command::Webhook(WebhookCmd::Deliveries { id }) => {
+            let w = ws(cli.workspace.as_deref())?;
+            let v = client
+                .request(
+                    reqwest::Method::GET,
+                    &format!("/v1/workspaces/{w}/webhooks/{id}/deliveries"),
+                    None,
+                )
+                .await?
+                .unwrap_or(Value::Null);
+            print_value(&v, cli.json);
+        }
+        Command::Webhook(WebhookCmd::Redeliver { id, delivery_id }) => {
+            let w = ws(cli.workspace.as_deref())?;
+            client
+                .request(
+                    reqwest::Method::POST,
+                    &format!("/v1/workspaces/{w}/webhooks/{id}/deliveries/{delivery_id}/redeliver"),
+                    None,
+                )
+                .await?;
+            if !cli.quiet {
+                eprintln!("re-queued delivery {delivery_id}");
+            }
         }
     }
     Ok(())

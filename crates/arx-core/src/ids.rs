@@ -52,3 +52,5 @@ id_type!(DeploymentId, "dep");
 id_type!(VariableId, "var");
 id_type!(DomainId, "dom");
 id_type!(WebhookEventId, "wh");
+id_type!(WebhookEndpointId, "whe");
+id_type!(WebhookDeliveryId, "whd");

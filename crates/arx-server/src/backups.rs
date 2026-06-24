@@ -322,12 +322,24 @@ async fn scheduler_tick(app: &AppState) -> Result<(), Box<dyn std::error::Error 
             }
         };
         match backup_now(app, &service).await {
-            Ok(r) => info!(
-                service = %service.slug,
-                bytes = r.size_bytes,
-                "scheduled backup created"
-            ),
-            Err(e) => warn!(error = ?e, "scheduled backup failed"),
+            Ok(r) => {
+                info!(
+                    service = %service.slug,
+                    bytes = r.size_bytes,
+                    "scheduled backup created"
+                );
+                crate::webhooks::emit_backup_for_service(app, &service, true, None).await;
+            }
+            Err(e) => {
+                warn!(error = ?e, "scheduled backup failed");
+                crate::webhooks::emit_backup_for_service(
+                    app,
+                    &service,
+                    false,
+                    Some("backup_failed"),
+                )
+                .await;
+            }
         }
         // Record the attempt so the next run waits for the next cron occurrence
         // (regardless of success) instead of retrying on every 60s tick.

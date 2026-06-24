@@ -248,3 +248,89 @@ pub struct WebhookEvent {
     pub error: Option<String>,
     pub received_at: DateTime<Utc>,
 }
+
+/// What triggered a deployment, so the right outgoing-webhook event type can be
+/// emitted (a rollback and a restart both produce a fresh `Live` deployment but
+/// are distinct events to subscribers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeployTrigger {
+    #[default]
+    Deploy,
+    Restart,
+    Rollback,
+}
+
+/// A user-registered outgoing-webhook endpoint. `secret_ct`/`secret_nonce` hold
+/// an encrypted credential JSON blob whose shape is interpreted by the transport
+/// selected by `kind` (for `webhook`: `{"signing_secret": "..."}`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookEndpoint {
+    pub id: WebhookEndpointId,
+    pub workspace_id: WorkspaceId,
+    /// `None` = all projects in the workspace.
+    pub project_id: Option<ProjectId>,
+    pub kind: String,
+    pub url: String,
+    pub config: serde_json::Value,
+    pub secret_ct: Vec<u8>,
+    pub secret_nonce: Vec<u8>,
+    /// Subscribed event types, or `["*"]` for all.
+    pub events: Vec<String>,
+    pub active: bool,
+    pub consecutive_failures: i64,
+    pub first_failure_at: Option<DateTime<Utc>>,
+    pub disabled_reason: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryStatus {
+    Pending,
+    InFlight,
+    Success,
+    Failed,
+}
+
+impl DeliveryStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeliveryStatus::Pending => "pending",
+            DeliveryStatus::InFlight => "in_flight",
+            DeliveryStatus::Success => "success",
+            DeliveryStatus::Failed => "failed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "pending" => Some(DeliveryStatus::Pending),
+            "in_flight" => Some(DeliveryStatus::InFlight),
+            "success" => Some(DeliveryStatus::Success),
+            "failed" => Some(DeliveryStatus::Failed),
+            _ => None,
+        }
+    }
+}
+
+/// A single attempt-bearing delivery record. `id` doubles as the stable
+/// `X-Arx-Delivery` header value across retries (so receivers can deduplicate).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookDelivery {
+    pub id: WebhookDeliveryId,
+    pub endpoint_id: WebhookEndpointId,
+    pub event_id: String,
+    pub event_type: String,
+    pub payload: String,
+    pub status: DeliveryStatus,
+    pub attempts: i64,
+    pub next_attempt_at: Option<DateTime<Utc>>,
+    pub lease_until: Option<DateTime<Utc>>,
+    pub response_status: Option<i64>,
+    pub response_size: Option<i64>,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub delivered_at: Option<DateTime<Utc>>,
+    pub exhausted_at: Option<DateTime<Utc>>,
+}
