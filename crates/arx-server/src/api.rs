@@ -127,6 +127,24 @@ pub fn router(state: AppState) -> Router {
             "/v1/workspaces/:ws/admin/volumes/prune",
             post(prune_volumes_handler),
         )
+        .route(
+            "/v1/workspaces/:ws/webhooks",
+            get(list_webhooks).post(create_webhook),
+        )
+        .route(
+            "/v1/workspaces/:ws/webhooks/:id",
+            get(get_webhook).patch(patch_webhook).delete(delete_webhook),
+        )
+        .route("/v1/workspaces/:ws/webhooks/:id/enable", post(enable_webhook))
+        .route("/v1/workspaces/:ws/webhooks/:id/test", post(test_webhook))
+        .route(
+            "/v1/workspaces/:ws/webhooks/:id/deliveries",
+            get(list_webhook_deliveries),
+        )
+        .route(
+            "/v1/workspaces/:ws/webhooks/:id/deliveries/:did/redeliver",
+            post(redeliver_webhook),
+        )
         .merge(crate::github_routes::routes())
         .merge(crate::setup::routes())
         .with_state(state)
@@ -1624,4 +1642,330 @@ async fn prune_volumes_handler(
     )
     .await;
     Ok(Json(result))
+}
+
+// ---------------------------------------------------------------------------
+// Outgoing webhooks (admin-only). Endpoints are workspace-scoped; the optional
+// project filter and event subscription narrow what each receives.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct WebhookEndpointResp {
+    id: String,
+    workspace_id: String,
+    project_id: Option<String>,
+    kind: String,
+    url: String,
+    events: Vec<String>,
+    active: bool,
+    consecutive_failures: i64,
+    disabled_reason: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+impl From<arx_core::model::WebhookEndpoint> for WebhookEndpointResp {
+    fn from(e: arx_core::model::WebhookEndpoint) -> Self {
+        // Note: secret_ct/secret_nonce are intentionally never serialized.
+        Self {
+            id: e.id.as_uuid().to_string(),
+            workspace_id: e.workspace_id.as_uuid().to_string(),
+            project_id: e.project_id.map(|p| p.as_uuid().to_string()),
+            kind: e.kind,
+            url: e.url,
+            events: e.events,
+            active: e.active,
+            consecutive_failures: e.consecutive_failures,
+            disabled_reason: e.disabled_reason,
+            created_at: e.created_at.to_rfc3339(),
+            updated_at: e.updated_at.to_rfc3339(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateWebhookReq {
+    url: String,
+    /// Optional caller-supplied signing secret. If omitted, one is generated and
+    /// returned exactly once in the create response.
+    #[serde(default)]
+    secret: Option<String>,
+    /// Subscribed event types; defaults to ["*"] (all).
+    #[serde(default)]
+    events: Option<Vec<String>>,
+    /// Optional project slug to scope the endpoint to a single project.
+    #[serde(default)]
+    project: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CreateWebhookResp {
+    #[serde(flatten)]
+    endpoint: WebhookEndpointResp,
+    /// The signing secret, shown only once at creation.
+    secret: String,
+}
+
+async fn list_webhooks(
+    Auth(user): Auth,
+    State(app): State<AppState>,
+    Path(ws): Path<String>,
+) -> ApiResult<Json<Vec<WebhookEndpointResp>>> {
+    let ws_id = require_admin(&app, user.user_id, &ws).await?;
+    let eps = arx_db::queries::webhooks::list_in_workspace(&app.db, ws_id).await?;
+    Ok(Json(eps.into_iter().map(WebhookEndpointResp::from).collect()))
+}
+
+async fn create_webhook(
+    Auth(user): Auth,
+    State(app): State<AppState>,
+    Path(ws): Path<String>,
+    Json(req): Json<CreateWebhookReq>,
+) -> ApiResult<Json<CreateWebhookResp>> {
+    let ws_id = require_admin(&app, user.user_id, &ws).await?;
+    crate::webhooks::ssrf::validate_url(&req.url).map_err(ApiError::bad_request)?;
+
+    let project_id = match &req.project {
+        Some(slug) => Some(projects::get_by_slug(&app.db, ws_id, slug).await?.id),
+        None => None,
+    };
+
+    let secret = match req.secret {
+        Some(s) if !s.is_empty() => s,
+        _ => generate_secret(),
+    };
+    let credentials = serde_json::json!({ "signing_secret": secret });
+    let events = req.events.unwrap_or_else(|| vec!["*".to_string()]);
+
+    let ep = arx_db::queries::webhooks::create(
+        &app.db,
+        &app.master_key,
+        ws_id,
+        project_id,
+        "webhook",
+        &req.url,
+        &serde_json::json!({}),
+        &credentials,
+        &events,
+    )
+    .await?;
+
+    let _ = arx_db::queries::audit::write(
+        &app.db,
+        Some(user.user_id),
+        "webhook.create",
+        &format!("webhook_endpoint:{}", ep.id.as_uuid()),
+        serde_json::json!({ "url": ep.url }),
+    )
+    .await;
+
+    Ok(Json(CreateWebhookResp {
+        endpoint: WebhookEndpointResp::from(ep),
+        secret,
+    }))
+}
+
+/// Loads an endpoint and verifies it belongs to the resolved workspace, so an
+/// admin of workspace A cannot touch workspace B's endpoints by id.
+async fn load_owned_endpoint(
+    app: &AppState,
+    ws_id: WorkspaceId,
+    id: &str,
+) -> ApiResult<arx_core::model::WebhookEndpoint> {
+    let uuid = uuid::Uuid::parse_str(id).map_err(|_| ApiError::bad_request("bad webhook id"))?;
+    let ep = arx_db::queries::webhooks::get(
+        &app.db,
+        arx_core::ids::WebhookEndpointId::from_uuid(uuid),
+    )
+    .await?;
+    if ep.workspace_id != ws_id {
+        return Err(ApiError::not_found());
+    }
+    Ok(ep)
+}
+
+async fn get_webhook(
+    Auth(user): Auth,
+    State(app): State<AppState>,
+    Path((ws, id)): Path<(String, String)>,
+) -> ApiResult<Json<WebhookEndpointResp>> {
+    let ws_id = require_admin(&app, user.user_id, &ws).await?;
+    let ep = load_owned_endpoint(&app, ws_id, &id).await?;
+    Ok(Json(WebhookEndpointResp::from(ep)))
+}
+
+#[derive(Deserialize)]
+struct PatchWebhookReq {
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    events: Option<Vec<String>>,
+    #[serde(default)]
+    active: Option<bool>,
+}
+
+async fn patch_webhook(
+    Auth(user): Auth,
+    State(app): State<AppState>,
+    Path((ws, id)): Path<(String, String)>,
+    Json(req): Json<PatchWebhookReq>,
+) -> ApiResult<Json<WebhookEndpointResp>> {
+    let ws_id = require_admin(&app, user.user_id, &ws).await?;
+    let ep = load_owned_endpoint(&app, ws_id, &id).await?;
+    if let Some(u) = &req.url {
+        crate::webhooks::ssrf::validate_url(u).map_err(ApiError::bad_request)?;
+    }
+    let updated = arx_db::queries::webhooks::update(
+        &app.db,
+        ep.id,
+        req.url.as_deref(),
+        req.events.as_deref(),
+        req.active,
+        None,
+    )
+    .await?;
+    Ok(Json(WebhookEndpointResp::from(updated)))
+}
+
+async fn delete_webhook(
+    Auth(user): Auth,
+    State(app): State<AppState>,
+    Path((ws, id)): Path<(String, String)>,
+) -> ApiResult<axum::http::StatusCode> {
+    let ws_id = require_admin(&app, user.user_id, &ws).await?;
+    let ep = load_owned_endpoint(&app, ws_id, &id).await?;
+    arx_db::queries::webhooks::delete(&app.db, ep.id).await?;
+    let _ = arx_db::queries::audit::write(
+        &app.db,
+        Some(user.user_id),
+        "webhook.delete",
+        &format!("webhook_endpoint:{}", ep.id.as_uuid()),
+        serde_json::json!({}),
+    )
+    .await;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+async fn enable_webhook(
+    Auth(user): Auth,
+    State(app): State<AppState>,
+    Path((ws, id)): Path<(String, String)>,
+) -> ApiResult<Json<WebhookEndpointResp>> {
+    let ws_id = require_admin(&app, user.user_id, &ws).await?;
+    let ep = load_owned_endpoint(&app, ws_id, &id).await?;
+    let updated = arx_db::queries::webhooks::enable(&app.db, ep.id).await?;
+    Ok(Json(WebhookEndpointResp::from(updated)))
+}
+
+#[derive(Serialize)]
+struct TestWebhookResp {
+    delivery_id: Option<String>,
+}
+
+async fn test_webhook(
+    Auth(user): Auth,
+    State(app): State<AppState>,
+    Path((ws, id)): Path<(String, String)>,
+) -> ApiResult<Json<TestWebhookResp>> {
+    let ws_id = require_admin(&app, user.user_id, &ws).await?;
+    let ep = load_owned_endpoint(&app, ws_id, &id).await?;
+    rate_limit(ep.id.as_uuid().to_string())?;
+    let delivery_id = crate::webhooks::emit_test(&app, ep.id, &ws).await;
+    Ok(Json(TestWebhookResp {
+        delivery_id: delivery_id.map(|d| d.as_uuid().to_string()),
+    }))
+}
+
+#[derive(Serialize)]
+struct WebhookDeliveryResp {
+    id: String,
+    event_id: String,
+    event_type: String,
+    status: String,
+    attempts: i64,
+    response_status: Option<i64>,
+    error: Option<String>,
+    created_at: String,
+    delivered_at: Option<String>,
+    exhausted_at: Option<String>,
+}
+
+impl From<arx_core::model::WebhookDelivery> for WebhookDeliveryResp {
+    fn from(d: arx_core::model::WebhookDelivery) -> Self {
+        // Note: the response body is never stored, so it cannot be exposed here.
+        Self {
+            id: d.id.as_uuid().to_string(),
+            event_id: d.event_id,
+            event_type: d.event_type,
+            status: d.status.as_str().to_string(),
+            attempts: d.attempts,
+            response_status: d.response_status,
+            error: d.error,
+            created_at: d.created_at.to_rfc3339(),
+            delivered_at: d.delivered_at.map(|t| t.to_rfc3339()),
+            exhausted_at: d.exhausted_at.map(|t| t.to_rfc3339()),
+        }
+    }
+}
+
+async fn list_webhook_deliveries(
+    Auth(user): Auth,
+    State(app): State<AppState>,
+    Path((ws, id)): Path<(String, String)>,
+) -> ApiResult<Json<Vec<WebhookDeliveryResp>>> {
+    let ws_id = require_admin(&app, user.user_id, &ws).await?;
+    let ep = load_owned_endpoint(&app, ws_id, &id).await?;
+    let deliveries = arx_db::queries::webhooks::list_for_endpoint(&app.db, ep.id, 100).await?;
+    Ok(Json(
+        deliveries.into_iter().map(WebhookDeliveryResp::from).collect(),
+    ))
+}
+
+async fn redeliver_webhook(
+    Auth(user): Auth,
+    State(app): State<AppState>,
+    Path((ws, id, did)): Path<(String, String, String)>,
+) -> ApiResult<axum::http::StatusCode> {
+    let ws_id = require_admin(&app, user.user_id, &ws).await?;
+    let ep = load_owned_endpoint(&app, ws_id, &id).await?;
+    rate_limit(ep.id.as_uuid().to_string())?;
+    let did_uuid =
+        uuid::Uuid::parse_str(&did).map_err(|_| ApiError::bad_request("bad delivery id"))?;
+    let delivery_id = arx_core::ids::WebhookDeliveryId::from_uuid(did_uuid);
+    // Verify the delivery belongs to this endpoint.
+    let delivery = arx_db::queries::webhooks::get_delivery(&app.db, delivery_id).await?;
+    if delivery.endpoint_id != ep.id {
+        return Err(ApiError::not_found());
+    }
+    arx_db::queries::webhooks::reset_for_redeliver(&app.db, delivery_id).await?;
+    Ok(axum::http::StatusCode::ACCEPTED)
+}
+
+/// Generates a random 32-byte hex signing secret.
+fn generate_secret() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+/// Minimal per-endpoint rate limit for `test`/`redeliver` to bound member-driven
+/// outbound traffic (these are admin-only already; this caps accidental loops).
+fn rate_limit(key: String) -> ApiResult<()> {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+    use std::sync::Mutex;
+    use std::time::Instant;
+    static LAST: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    const MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+    let map = LAST.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    if let Some(prev) = guard.get(&key) {
+        if now.duration_since(*prev) < MIN_INTERVAL {
+            return Err(ApiError::bad_request("rate limited; try again shortly"));
+        }
+    }
+    guard.insert(key, now);
+    Ok(())
 }
