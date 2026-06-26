@@ -15,6 +15,8 @@ pub async fn create(
     arx_core::slug::validate("environment slug", slug)?;
     let id = EnvironmentId::new();
     let now = Utc::now();
+    let mut tx = pool.begin().await.map_err(map_sqlx)?;
+
     sqlx::query(
         "INSERT INTO environments (id, project_id, slug, name, is_default, created_at)
          VALUES (?, ?, ?, ?, 0, ?)",
@@ -24,9 +26,31 @@ pub async fn create(
     .bind(slug)
     .bind(name)
     .bind(now.to_rfc3339())
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(map_sqlx)?;
+
+    let service_rows = sqlx::query("SELECT id FROM services WHERE project_id = ?")
+        .bind(project_id.as_uuid().to_string())
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+    for service_row in service_rows {
+        let service_id: String = service_row.try_get("id").map_err(map_sqlx)?;
+        sqlx::query(
+            "INSERT INTO service_env_configs
+             (service_id, environment_id, cpu_limit, memory_limit_mb,
+              healthcheck_mode, healthcheck_path, healthcheck_timeout_seconds, current_deployment_id)
+             VALUES (?, ?, NULL, NULL, 'tcp', NULL, 60, NULL)",
+        )
+        .bind(service_id)
+        .bind(id.as_uuid().to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+    }
+
+    tx.commit().await.map_err(map_sqlx)?;
     Ok(Environment {
         id,
         project_id,

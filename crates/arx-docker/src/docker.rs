@@ -326,10 +326,14 @@ impl ContainerEngine for DockerEngine {
             .inspect_container(&handle.0, None)
             .await
             .map_err(map_err)?;
+        let restart_count = info.restart_count.unwrap_or(0);
         let state = info.state.unwrap_or_default();
         let status = match state.status {
             Some(ContainerStateStatusEnum::CREATED) => ContainerStatus::Created,
-            Some(ContainerStateStatusEnum::RUNNING) => ContainerStatus::Running,
+            Some(ContainerStateStatusEnum::RUNNING) => ContainerStatus::Running {
+                restart_count,
+                started_at: state.started_at,
+            },
             Some(ContainerStateStatusEnum::RESTARTING) => ContainerStatus::Restarting,
             Some(ContainerStateStatusEnum::PAUSED) => ContainerStatus::Paused,
             Some(ContainerStateStatusEnum::EXITED) => ContainerStatus::Exited {
@@ -519,7 +523,7 @@ mod tests {
         let st = engine.status(&h).await.unwrap();
         assert!(matches!(
             st,
-            ContainerStatus::Running | ContainerStatus::Exited { .. }
+            ContainerStatus::Running { .. } | ContainerStatus::Exited { .. }
         ));
         engine.stop_and_remove(&h).await.unwrap();
     }

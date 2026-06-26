@@ -3,7 +3,8 @@ use crate::state::AppState;
 use arx_build::validate;
 use arx_core::ids::{EnvironmentId, ProjectId, ServiceId};
 use arx_core::model::{
-    Deployment, DeploymentStatus, Environment, Project, Service, ServiceSource, Workspace,
+    Deployment, DeploymentStatus, Environment, HealthcheckMode, Project, Service, ServiceSource,
+    Workspace,
 };
 use arx_db::queries::{deployments, domains, service_env, services as svc_q};
 use arx_docker::{
@@ -595,14 +596,20 @@ pub(crate) async fn deploy_docker_image(
         }
     }
 
+    let ports = if env_cfg.healthcheck_mode == HealthcheckMode::None {
+        vec![]
+    } else {
+        vec![PortBinding {
+            container_port: port,
+            protocol: Protocol::Tcp,
+        }]
+    };
+
     let spec = ContainerSpec {
         image: image.clone(),
         name: container_name.clone(),
         env: injected,
-        ports: vec![PortBinding {
-            container_port: port,
-            protocol: Protocol::Tcp,
-        }],
+        ports,
         mounts: extra_mounts,
         resources,
         restart: restart_policy_from(&ctx.service.restart_policy),
@@ -630,24 +637,42 @@ pub(crate) async fn deploy_docker_image(
     };
 
     let timeout_seconds = env_cfg.healthcheck_timeout_seconds.max(1) as u64;
+    let timeout = Duration::from_secs(timeout_seconds);
     tracing::info!(
         deployment_id = %dep_id.as_uuid(),
         port,
+        mode = env_cfg.healthcheck_mode.as_str(),
         timeout_seconds,
         "waiting for healthy"
     );
-    let healthy = wait_healthy(
-        &app.docker,
-        &app.http,
-        &handle,
-        port,
-        env_cfg
-            .healthcheck_path
-            .as_deref()
-            .filter(|s| !s.is_empty()),
-        Duration::from_secs(timeout_seconds),
-    )
-    .await;
+    let healthy = match env_cfg.healthcheck_mode {
+        HealthcheckMode::Tcp => {
+            wait_healthy(&app.docker, &app.http, &handle, port, None, timeout).await
+        }
+        HealthcheckMode::Http => {
+            let Some(path) = env_cfg
+                .healthcheck_path
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+            else {
+                let msg = "http healthcheck requires healthcheck_path".to_string();
+                warn!("{msg}");
+                let _ = app.docker.stop_and_remove(&handle).await;
+                let _ = deployments::update_status(
+                    &app.db,
+                    dep_id,
+                    DeploymentStatus::Failed,
+                    Some(handle.as_str()),
+                    Some(&msg),
+                    true,
+                )
+                .await;
+                return Err(ApiError::bad_request(msg));
+            };
+            wait_healthy(&app.docker, &app.http, &handle, port, Some(path), timeout).await
+        }
+        HealthcheckMode::None => wait_stably_running(&app.docker, &handle, timeout).await,
+    };
     tracing::info!(deployment_id = %dep_id.as_uuid(), healthy, "healthcheck complete");
     if !healthy {
         let msg = format!("healthcheck failed after {timeout_seconds}s");
@@ -720,6 +745,52 @@ pub(crate) async fn deploy_docker_image(
 
     let dep = deployments::get(&app.db, dep_id).await?;
     Ok(dep)
+}
+
+async fn wait_stably_running(
+    engine: &arx_docker::DockerEngine,
+    handle: &arx_docker::ContainerHandle,
+    timeout: Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut baseline: Option<(i64, Option<String>)> = None;
+
+    while std::time::Instant::now() < deadline {
+        match engine.status(handle).await {
+            Ok(arx_docker::ContainerStatus::Running {
+                restart_count,
+                started_at,
+            }) => {
+                let current = (restart_count, started_at);
+                if let Some(prev) = &baseline {
+                    if prev != &current {
+                        tracing::warn!(
+                            restart_count,
+                            "wait_stably_running: restart metadata changed"
+                        );
+                        return false;
+                    }
+                } else {
+                    baseline = Some(current);
+                }
+            }
+            Ok(arx_docker::ContainerStatus::Exited { code }) => {
+                tracing::warn!(code, "wait_stably_running: container exited during startup");
+                return false;
+            }
+            Ok(status) => {
+                tracing::warn!(status = ?status, "wait_stably_running: container not running");
+                return false;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "wait_stably_running: status failed");
+                return false;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    baseline.is_some()
 }
 
 async fn wait_healthy(

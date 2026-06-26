@@ -92,10 +92,15 @@ pub enum RestartPolicy {
 #[serde(rename_all = "snake_case")]
 pub enum ContainerStatus {
     Created,
-    Running,
+    Running {
+        restart_count: i64,
+        started_at: Option<String>,
+    },
     Restarting,
     Paused,
-    Exited { code: i64 },
+    Exited {
+        code: i64,
+    },
     Dead,
     Removing,
     Unknown,
@@ -103,7 +108,7 @@ pub enum ContainerStatus {
 
 impl ContainerStatus {
     pub fn is_running(&self) -> bool {
-        matches!(self, ContainerStatus::Running)
+        matches!(self, ContainerStatus::Running { .. })
     }
 }
 

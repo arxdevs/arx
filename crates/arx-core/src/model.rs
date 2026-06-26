@@ -143,12 +143,41 @@ pub enum ServiceSource {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HealthcheckMode {
+    #[default]
+    Tcp,
+    Http,
+    None,
+}
+
+impl HealthcheckMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            HealthcheckMode::Tcp => "tcp",
+            HealthcheckMode::Http => "http",
+            HealthcheckMode::None => "none",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "tcp" => Some(HealthcheckMode::Tcp),
+            "http" => Some(HealthcheckMode::Http),
+            "none" => Some(HealthcheckMode::None),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceEnvConfig {
     pub service_id: ServiceId,
     pub environment_id: EnvironmentId,
     pub cpu_limit: Option<f64>,
     pub memory_limit_mb: Option<i64>,
+    pub healthcheck_mode: HealthcheckMode,
     pub healthcheck_path: Option<String>,
     pub healthcheck_timeout_seconds: i32,
     pub current_deployment_id: Option<DeploymentId>,
