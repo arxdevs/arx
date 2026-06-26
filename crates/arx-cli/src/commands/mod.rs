@@ -434,6 +434,9 @@ pub(crate) async fn dispatch(
             watch_paths,
             build_command,
             start_command,
+            healthcheck,
+            healthcheck_path,
+            healthcheck_timeout,
         }) => {
             let w = ws(cli.workspace.as_deref())?;
             let p = pr(cli.project.as_deref())?;
@@ -483,6 +486,18 @@ pub(crate) async fn dispatch(
             }
             if let Some(s) = start_command {
                 body["start_command"] = Value::String(s);
+            }
+            if let Some(env) = cli.env.as_deref() {
+                body["env"] = Value::String(env.to_string());
+            }
+            if let Some(h) = healthcheck {
+                body["healthcheck_mode"] = Value::String(h);
+            }
+            if let Some(path) = healthcheck_path {
+                body["healthcheck_path"] = Value::String(path);
+            }
+            if let Some(timeout) = healthcheck_timeout {
+                body["healthcheck_timeout_seconds"] = Value::Number(timeout.into());
             }
             let v = client
                 .request(
@@ -699,7 +714,25 @@ pub(crate) async fn dispatch(
         Command::Domain(DomainCmd::Add { service, hostname }) => {
             let w = ws(cli.workspace.as_deref())?;
             let p = pr(cli.project.as_deref())?;
-            let env = cli.env.unwrap_or_else(|| "production".into());
+            let env = cli.env.clone().unwrap_or_else(|| "production".into());
+            if !cli.quiet {
+                if let Ok(Some(cfg)) = client
+                    .request(
+                        reqwest::Method::GET,
+                        &format!(
+                            "/v1/workspaces/{w}/projects/{p}/services/{service}/config?env={env}"
+                        ),
+                        None,
+                    )
+                    .await
+                {
+                    if cfg.get("healthcheck_mode").and_then(|v| v.as_str()) == Some("none") {
+                        eprintln!(
+                            "warning: service uses healthcheck none; ensure it listens on PORT/ARX_PORT (or 8080) before attaching a domain"
+                        );
+                    }
+                }
+            }
             let v = client
                 .request(
                     reqwest::Method::POST,
@@ -809,23 +842,45 @@ pub(crate) async fn dispatch(
             service,
             cpu,
             memory_mb,
+            healthcheck,
             healthcheck_path,
             healthcheck_timeout,
         }) => {
             let w = ws(cli.workspace.as_deref())?;
             let p = pr(cli.project.as_deref())?;
             let env = cli.env.unwrap_or_else(|| "production".into());
+            let mut body = serde_json::Map::new();
+            body.insert("env".into(), Value::String(env));
+            if let Some(cpu) = cpu {
+                body.insert("cpu_limit".into(), json!(cpu));
+            }
+            if let Some(memory_mb) = memory_mb {
+                body.insert("memory_limit_mb".into(), json!(memory_mb));
+            }
+            if let Some(healthcheck) = healthcheck {
+                body.insert("healthcheck_mode".into(), Value::String(healthcheck));
+            }
+            if let Some(healthcheck_path) = healthcheck_path {
+                body.insert(
+                    "healthcheck_path".into(),
+                    if healthcheck_path.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::String(healthcheck_path)
+                    },
+                );
+            }
+            if let Some(healthcheck_timeout) = healthcheck_timeout {
+                body.insert(
+                    "healthcheck_timeout_seconds".into(),
+                    json!(healthcheck_timeout),
+                );
+            }
             let v = client
                 .request(
                     reqwest::Method::PATCH,
                     &format!("/v1/workspaces/{w}/projects/{p}/services/{service}/config"),
-                    Some(json!({
-                        "env": env,
-                        "cpu_limit": cpu,
-                        "memory_limit_mb": memory_mb,
-                        "healthcheck_path": healthcheck_path,
-                        "healthcheck_timeout_seconds": healthcheck_timeout,
-                    })),
+                    Some(Value::Object(body)),
                 )
                 .await?
                 .unwrap_or(Value::Null);

@@ -2,7 +2,7 @@ use crate::auth::Auth;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 use arx_core::ids::{EnvironmentId, ProjectId, ServiceId, WorkspaceId};
-use arx_core::model::{Project, Role, Service, ServiceSource, Workspace};
+use arx_core::model::{HealthcheckMode, Project, Role, Service, ServiceSource, Workspace};
 use arx_db::queries::{
     auth as auth_q, deployments, domains, environments, members, projects, service_env, services,
     variables, workspaces,
@@ -629,6 +629,69 @@ async fn delete_environment_handler(
     Ok(())
 }
 
+fn parse_healthcheck_mode(value: &str) -> ApiResult<HealthcheckMode> {
+    HealthcheckMode::parse(value).ok_or_else(|| ApiError::bad_request("invalid healthcheck mode"))
+}
+
+fn non_empty_healthcheck_path(path: Option<String>) -> Option<String> {
+    path.and_then(|p| {
+        let trimmed = p.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+#[derive(Debug, Clone)]
+struct NormalizedHealthcheckPatch {
+    mode: Option<HealthcheckMode>,
+    path: Option<Option<String>>,
+}
+
+fn normalize_healthcheck_patch(
+    current: Option<&service_env::EnvConfig>,
+    mode: Option<String>,
+    path: Option<Option<String>>,
+) -> ApiResult<NormalizedHealthcheckPatch> {
+    let path_present = path.is_some();
+    let normalized_path = path.and_then(non_empty_healthcheck_path);
+    let parsed_mode = mode.as_deref().map(parse_healthcheck_mode).transpose()?;
+    let effective_mode = match parsed_mode {
+        Some(m) => Some(m),
+        None if path_present && normalized_path.is_some() => Some(HealthcheckMode::Http),
+        None if path_present => Some(HealthcheckMode::Tcp),
+        None => None,
+    };
+
+    let effective_path = match effective_mode {
+        Some(HealthcheckMode::Http) => normalized_path.clone().or_else(|| {
+            current.and_then(|c| non_empty_healthcheck_path(c.healthcheck_path.clone()))
+        }),
+        Some(HealthcheckMode::Tcp | HealthcheckMode::None) => None,
+        None => None,
+    };
+
+    if matches!(effective_mode, Some(HealthcheckMode::Http)) && effective_path.is_none() {
+        return Err(ApiError::bad_request(
+            "healthcheck_path is required for http healthcheck",
+        ));
+    }
+
+    let path_patch = match effective_mode {
+        Some(HealthcheckMode::Http) => Some(effective_path),
+        Some(HealthcheckMode::Tcp | HealthcheckMode::None) => Some(None),
+        None if path_present => Some(effective_path),
+        None => None,
+    };
+
+    Ok(NormalizedHealthcheckPatch {
+        mode: effective_mode,
+        path: path_patch,
+    })
+}
+
 #[derive(Deserialize)]
 struct CreateServiceReq {
     slug: String,
@@ -638,6 +701,14 @@ struct CreateServiceReq {
     build_command: Option<String>,
     #[serde(default)]
     start_command: Option<String>,
+    #[serde(default)]
+    env: Option<String>,
+    #[serde(default)]
+    healthcheck_mode: Option<String>,
+    #[serde(default)]
+    healthcheck_path: Option<String>,
+    #[serde(default)]
+    healthcheck_timeout_seconds: Option<i32>,
 }
 
 #[derive(Serialize)]
@@ -688,6 +759,26 @@ async fn create_service(
 ) -> ApiResult<Json<ServiceResp>> {
     let (ws_id, _) = require_workspace_role(&app, user.user_id, &ws).await?;
     let p = projects::get_by_slug(&app.db, ws_id, &proj).await?;
+    let env_slug = req.env.as_deref().unwrap_or("production");
+    let env = environments::get_by_slug(&app.db, p.id, env_slug).await?;
+    let healthcheck = normalize_healthcheck_patch(
+        None,
+        req.healthcheck_mode.clone(),
+        req.healthcheck_path.clone().map(Some),
+    )?;
+    let initial_env_config = if req.healthcheck_mode.is_some()
+        || req.healthcheck_path.is_some()
+        || req.healthcheck_timeout_seconds.is_some()
+    {
+        Some(services::InitialEnvConfig {
+            environment_id: env.id,
+            healthcheck_mode: healthcheck.mode,
+            healthcheck_path: healthcheck.path.flatten(),
+            healthcheck_timeout_seconds: req.healthcheck_timeout_seconds,
+        })
+    } else {
+        None
+    };
     let s = services::create(
         &app.db,
         p.id,
@@ -696,6 +787,7 @@ async fn create_service(
         &req.source,
         req.build_command.as_deref(),
         req.start_command.as_deref(),
+        initial_env_config,
     )
     .await?;
     Ok(Json(s.into()))
@@ -1047,6 +1139,7 @@ async fn deploy_service(
 struct EnvConfigResp {
     cpu_limit: Option<f64>,
     memory_limit_mb: Option<i64>,
+    healthcheck_mode: &'static str,
     healthcheck_path: Option<String>,
     healthcheck_timeout_seconds: i32,
 }
@@ -1063,6 +1156,7 @@ async fn get_env_config(
     Ok(Json(EnvConfigResp {
         cpu_limit: c.cpu_limit,
         memory_limit_mb: c.memory_limit_mb,
+        healthcheck_mode: c.healthcheck_mode.as_str(),
         healthcheck_path: c.healthcheck_path,
         healthcheck_timeout_seconds: c.healthcheck_timeout_seconds,
     }))
@@ -1077,7 +1171,9 @@ struct PatchEnvConfigReq {
     #[serde(default)]
     memory_limit_mb: Option<i64>,
     #[serde(default)]
-    healthcheck_path: Option<String>,
+    healthcheck_mode: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    healthcheck_path: Option<Option<String>>,
     #[serde(default)]
     healthcheck_timeout_seconds: Option<i32>,
 }
@@ -1090,6 +1186,9 @@ async fn patch_env_config(
 ) -> ApiResult<Json<EnvConfigResp>> {
     let (_, _) = require_workspace_role(&app, user.user_id, &ws).await?;
     let (sid, eid, _) = resolve_se(&app, &ws, &proj, &svc, req.env.as_deref()).await?;
+    let current = service_env::get(&app.db, sid, eid).await?;
+    let healthcheck =
+        normalize_healthcheck_patch(Some(&current), req.healthcheck_mode, req.healthcheck_path)?;
     service_env::update(
         &app.db,
         sid,
@@ -1097,7 +1196,8 @@ async fn patch_env_config(
         service_env::EnvConfigPatch {
             cpu_limit: req.cpu_limit,
             memory_limit_mb: req.memory_limit_mb,
-            healthcheck_path: req.healthcheck_path,
+            healthcheck_mode: healthcheck.mode,
+            healthcheck_path: healthcheck.path,
             healthcheck_timeout_seconds: req.healthcheck_timeout_seconds,
         },
     )
@@ -1106,6 +1206,7 @@ async fn patch_env_config(
     Ok(Json(EnvConfigResp {
         cpu_limit: c.cpu_limit,
         memory_limit_mb: c.memory_limit_mb,
+        healthcheck_mode: c.healthcheck_mode.as_str(),
         healthcheck_path: c.healthcheck_path,
         healthcheck_timeout_seconds: c.healthcheck_timeout_seconds,
     }))

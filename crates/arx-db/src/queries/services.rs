@@ -1,6 +1,6 @@
 use super::{RowExt, map_sqlx};
 use arx_core::ids::{EnvironmentId, ProjectId, ServiceId, WorkspaceId};
-use arx_core::model::{Service, ServiceKind, ServiceSource};
+use arx_core::model::{HealthcheckMode, Service, ServiceKind, ServiceSource};
 use arx_core::{Error, Result};
 use chrono::{DateTime, Utc};
 use sqlx::{Row, SqlitePool};
@@ -27,6 +27,15 @@ impl ServicePatch {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct InitialEnvConfig {
+    pub environment_id: EnvironmentId,
+    pub healthcheck_mode: Option<HealthcheckMode>,
+    pub healthcheck_path: Option<String>,
+    pub healthcheck_timeout_seconds: Option<i32>,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn create(
     pool: &SqlitePool,
     project_id: ProjectId,
@@ -35,6 +44,7 @@ pub async fn create(
     source: &ServiceSource,
     build_command: Option<&str>,
     start_command: Option<&str>,
+    initial_env_config: Option<InitialEnvConfig>,
 ) -> Result<Service> {
     arx_core::slug::validate("service slug", slug)?;
     let id = ServiceId::new();
@@ -73,14 +83,27 @@ pub async fn create(
         .map_err(map_sqlx)?;
     for env_row in env_rows {
         let env_id: String = env_row.try_get("id").map_err(map_sqlx)?;
+        let initial = initial_env_config
+            .as_ref()
+            .filter(|cfg| cfg.environment_id.as_uuid().to_string() == env_id);
+        let healthcheck_mode = initial
+            .and_then(|cfg| cfg.healthcheck_mode)
+            .unwrap_or(HealthcheckMode::Tcp);
+        let healthcheck_path = initial.and_then(|cfg| cfg.healthcheck_path.as_deref());
+        let healthcheck_timeout_seconds = initial
+            .and_then(|cfg| cfg.healthcheck_timeout_seconds)
+            .unwrap_or(60);
         sqlx::query(
             "INSERT INTO service_env_configs
              (service_id, environment_id, cpu_limit, memory_limit_mb,
-              healthcheck_path, healthcheck_timeout_seconds, current_deployment_id)
-             VALUES (?, ?, NULL, NULL, NULL, 60, NULL)",
+              healthcheck_mode, healthcheck_path, healthcheck_timeout_seconds, current_deployment_id)
+             VALUES (?, ?, NULL, NULL, ?, ?, ?, NULL)",
         )
         .bind(id.as_uuid().to_string())
-        .bind(env_id)
+        .bind(&env_id)
+        .bind(healthcheck_mode.as_str())
+        .bind(healthcheck_path)
+        .bind(healthcheck_timeout_seconds)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx)?;

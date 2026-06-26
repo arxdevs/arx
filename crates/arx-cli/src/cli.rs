@@ -40,6 +40,7 @@ pub(crate) struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Command {
     Setup {
         #[arg(long)]
@@ -296,6 +297,8 @@ pub(crate) enum ConfigCmd {
         cpu: Option<f64>,
         #[arg(long)]
         memory_mb: Option<i64>,
+        #[arg(long, value_parser = ["tcp", "http", "none"])]
+        healthcheck: Option<String>,
         #[arg(long)]
         healthcheck_path: Option<String>,
         #[arg(long)]
@@ -414,6 +417,15 @@ pub(crate) enum ServiceCmd {
         /// Override the container start command. Pass an empty string ("") to clear later via `service config`.
         #[arg(long = "start-cmd")]
         start_command: Option<String>,
+        /// Initial readiness check mode for the selected environment.
+        #[arg(long = "healthcheck", value_parser = ["tcp", "http", "none"])]
+        healthcheck: Option<String>,
+        /// Initial HTTP healthcheck path for the selected environment.
+        #[arg(long = "healthcheck-path")]
+        healthcheck_path: Option<String>,
+        /// Initial healthcheck timeout in seconds for the selected environment.
+        #[arg(long = "healthcheck-timeout")]
+        healthcheck_timeout: Option<i32>,
     },
     Delete {
         slug: String,

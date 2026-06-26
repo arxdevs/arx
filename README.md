@@ -37,6 +37,30 @@ arx -w default -p demo service config set web \
     --build-cmd "..." --start-cmd "..."
 ```
 
+### Healthchecks
+
+By default arx waits for the container to listen on `PORT`, then `ARX_PORT`, then
+`8080`. Use an HTTP endpoint when the app has one:
+
+```bash
+arx -w default -p demo config set web \
+    --healthcheck http --healthcheck-path /health
+```
+
+For no-port long-running services such as Discord bots, disable port probing:
+
+```bash
+arx -w default -p demo service create \
+    --slug discord-bot --name "Discord Bot" --kind git \
+    --repo your-org/discord-bot --branch main \
+    --start-cmd "node bot.js" \
+    --healthcheck none
+```
+
+`--healthcheck none` does not create a public route. If you attach a domain to
+such a service, the container must still listen on `PORT` / `ARX_PORT` (or the
+fallback `8080`) for Traefik to reach it.
+
 Service variables (`var set`) are available **both at build time and at runtime**.
 For auto-detected stacks they appear in your build command as ordinary env vars
 (e.g. `process.env.MY_VAR`) — no code change. They ride a BuildKit secret, so
