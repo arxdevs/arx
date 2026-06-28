@@ -1,0 +1,16 @@
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.maintenance {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}

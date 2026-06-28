@@ -1,0 +1,15 @@
+.wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 13px;
+  color: var(--text-soft);
+  cursor: pointer;
+}
+
+.input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}

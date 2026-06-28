@@ -1,0 +1,10 @@
+.invite {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
+.invite > *:first-child {
+  flex: 1;
+}

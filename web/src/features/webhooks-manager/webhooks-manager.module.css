@@ -1,0 +1,32 @@
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.9rem;
+}
+
+.head :global(.arx-section-title) {
+  margin-bottom: 0;
+}
+
+.rowActions {
+  display: flex;
+  gap: 0.4rem;
+  justify-content: flex-end;
+}
+
+.secret p {
+  margin: 0 0 0.6rem;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.secretValue {
+  display: block;
+  padding: 0.7rem 0.9rem;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  word-break: break-all;
+  font-size: 13px;
+}

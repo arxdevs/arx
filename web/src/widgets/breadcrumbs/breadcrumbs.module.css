@@ -1,0 +1,17 @@
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 13px;
+  margin-bottom: 1rem;
+  color: var(--muted);
+}
+
+.sep {
+  color: var(--border);
+}
+
+.current {
+  color: var(--text);
+  font-weight: 500;
+}

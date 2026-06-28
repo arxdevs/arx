@@ -1,0 +1,19 @@
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.9rem;
+}
+
+.head :global(.arx-section-title) {
+  margin-bottom: 0;
+}
+
+.result {
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 0.9rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-subtle);
+  border-radius: var(--radius-sm);
+}
