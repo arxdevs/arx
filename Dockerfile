@@ -1,5 +1,15 @@
 # syntax=docker/dockerfile:1.7
 
+# ---- Web build stage ----------------------------------------------------
+# Builds the React SPA into a static bundle that the Rust server embeds at
+# compile time. Node never reaches the runtime image.
+FROM node:22-bookworm-slim AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
 # ---- Build stage --------------------------------------------------------
 FROM rust:1-bookworm AS builder
 
@@ -25,6 +35,9 @@ COPY --from=cacher /usr/local/cargo /usr/local/cargo
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
 COPY migrations/ ./migrations/
+# Embed the prebuilt SPA. This lands after the cached dep layer, so a UI-only
+# change recompiles arx-server (rust-embed inlines the bytes) but not its deps.
+COPY --from=web /web/dist ./crates/arx-server/web-dist
 RUN cargo build --release --bin arx-server
 
 # ---- Runtime stage ------------------------------------------------------
