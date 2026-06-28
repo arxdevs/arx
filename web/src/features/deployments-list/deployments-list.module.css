@@ -1,0 +1,32 @@
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.table th {
+  text-align: left;
+  padding: 0.5rem 0.5rem;
+  color: var(--muted);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+}
+
+.table td {
+  padding: 0.55rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.mono {
+  font-family: ui-monospace, monospace;
+}
+
+.muted {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.right {
+  text-align: right;
+}

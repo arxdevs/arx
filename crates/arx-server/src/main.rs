@@ -4,6 +4,7 @@ mod auth;
 mod backups;
 mod cascade;
 mod cert_poll;
+mod csrf;
 mod db_template;
 mod deploy;
 mod deploy_queue;
@@ -16,6 +17,7 @@ mod state;
 mod supervisor;
 mod var_resolve;
 mod volumes;
+mod web;
 mod webhooks;
 
 use anyhow::Context;
@@ -111,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
         deploy_queue: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         in_flight_deploys: Arc::new(AtomicUsize::new(0)),
         http,
+        oauth_states: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     cleanup_interrupted_deployments(&state).await;
@@ -128,9 +131,12 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("binding {}", cfg.server.listen))?;
     tracing::info!(addr = %cfg.server.listen, "HTTP listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     await_in_flight_deploys(&state.in_flight_deploys, SHUTDOWN_GRACE_SECS).await;
     cleanup_interrupted_deployments(&state).await;

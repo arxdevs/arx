@@ -16,8 +16,9 @@ crates/
 ├─ arx-traefik/     dynamic.yml renderer + atomic writer
 ├─ arx-build/       stack detect + Dockerfile templates + docker build
 ├─ arx-github/      webhook HMAC verify + manifest helpers
-├─ arx-server/      axum HTTP API, deploy pipeline, schedulers
+├─ arx-server/      axum HTTP API, deploy pipeline, schedulers, embedded web UI
 └─ arx-cli/         clap CLI (the `arx` binary)
+web/                React + Vite SPA, built into arx-server (FSD layers)
 migrations/         sqlx SQL files (runtime-applied)
 compose.yml         two-container daemon stack (arx + traefik)
 ```
@@ -38,6 +39,20 @@ cargo fmt --all -- --check
 `--locked` is mandatory in CI; use it locally too so you don't drift from `Cargo.lock`.
 
 Build the daemon image locally with `docker build -t arx:local -f Dockerfile .`. The CLI binary builds with `cargo build --release --bin arx`.
+
+### Web UI
+
+`arx-server` embeds a React + Vite SPA (in `web/`) via `rust-embed` and serves it as a fallback for non-API GET routes — `arx.<root-domain>` opens the dashboard with no extra container. The daemon runtime stays Node-free; Node is a build-time-only toolchain.
+
+```bash
+cd web
+npm ci
+npm run build        # emits to ../crates/arx-server/web-dist (embedded at compile time)
+npm run dev          # vite dev server on :5173, proxies /v1 /health /webhooks to :7878
+npm run typecheck
+```
+
+`crates/arx-server/build.rs` guarantees the `web-dist/` directory exists, so `cargo` builds succeed without a web build (the binary then serves a "web UI not built" placeholder). The Dockerfile builds the SPA in a dedicated Node stage and copies it into the Rust compile stage. The SPA follows Feature-Sliced Design layers (`app → pages → widgets → features → entities → shared`).
 
 ## Conventions
 

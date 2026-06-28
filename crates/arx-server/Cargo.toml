@@ -49,3 +49,5 @@ hex = "0.4"
 hickory-resolver = "0.24"
 globset = { workspace = true }
 croner = "3.0.1"
+rust-embed = { workspace = true }
+mime_guess = { workspace = true }

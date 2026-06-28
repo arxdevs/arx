@@ -1,0 +1,50 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.bar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.status {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.connecting {
+  color: var(--warn);
+}
+
+.open {
+  color: var(--ok);
+}
+
+.closed {
+  color: var(--muted);
+}
+
+.box {
+  background: #0c0c0e;
+  color: #d6d6db;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  height: 420px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.line {
+  min-height: 1.2em;
+}
+
+.empty {
+  color: #6e6e73;
+}

@@ -113,14 +113,28 @@ pub async fn issue_session(
     user_id: UserId,
     label: Option<&str>,
 ) -> Result<CreatedSession> {
+    issue_session_with_expiry(pool, user_id, label, None).await
+}
+
+/// Like [`issue_session`] but with an explicit absolute expiry. Used by the web
+/// login flow, where a browser-held session cookie must not live forever.
+/// `expires_at = None` keeps the historical "non-expiring" behaviour used by the
+/// CLI flows.
+pub async fn issue_session_with_expiry(
+    pool: &SqlitePool,
+    user_id: UserId,
+    label: Option<&str>,
+    expires_at: Option<DateTime<Utc>>,
+) -> Result<CreatedSession> {
     let token = generate_token();
     let hash = hash_token(&token);
     let id = Uuid::now_v7();
     let now = Utc::now().to_rfc3339();
+    let exp = expires_at.map(|t| t.to_rfc3339());
 
     sqlx::query(
         "INSERT INTO sessions (id, user_id, token_hash, label, created_at, last_used_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, NULL)",
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(user_id.as_uuid().to_string())
@@ -128,6 +142,7 @@ pub async fn issue_session(
     .bind(label)
     .bind(&now)
     .bind(&now)
+    .bind(exp)
     .execute(pool)
     .await
     .map_err(map_sqlx)?;

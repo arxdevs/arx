@@ -25,6 +25,10 @@ Cargo.lock.bak
 /web/dist
 /web/.cache
 
+# Embedded SPA build output. The directory is recreated by build.rs at compile
+# time and (re)populated by `npm run build`, so nothing here is committed.
+/crates/arx-server/web-dist/
+
 # Local dev: do not commit this — auto-merged by `docker compose`
 compose.override.yml
 compose.override.*.yml

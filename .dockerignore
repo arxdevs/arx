@@ -2,6 +2,8 @@ target/
 .git/
 .github/
 README.md
-web/
-node_modules/
 *.md
+web/node_modules/
+web/dist/
+crates/arx-server/web-dist/
+node_modules/

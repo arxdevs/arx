@@ -102,6 +102,17 @@ arx <noun> --help
 
 `--json` for machine output, `-q/--quiet` to suppress informational messages.
 
+## Web UI
+
+arx is CLI-first, but the daemon also serves a small web dashboard. Once an
+admin domain is configured, open `https://arx.<root-domain>` in a browser, sign
+in with GitHub, and you can browse workspaces, projects, and services; deploy,
+restart, and roll back; stream logs; and edit variables, domains, and server
+settings. The UI is a static SPA embedded in the daemon binary — no extra
+container, no extra port. It uses the same GitHub login as the CLI; the browser
+session is an `HttpOnly` cookie, and cross-site requests to mutating endpoints
+are rejected (the CLI's `Bearer` token path is unaffected).
+
 ## Outgoing webhooks
 
 arx can POST a signed JSON event to a URL you register whenever a lifecycle
