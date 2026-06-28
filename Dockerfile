@@ -37,7 +37,7 @@ COPY crates/ ./crates/
 COPY migrations/ ./migrations/
 # Embed the prebuilt SPA. This lands after the cached dep layer, so a UI-only
 # change recompiles arx-server (rust-embed inlines the bytes) but not its deps.
-COPY --from=web /web/dist ./crates/arx-server/web-dist
+COPY --from=web /crates/arx-server/web-dist ./crates/arx-server/web-dist
 RUN cargo build --release --bin arx-server
 
 # ---- Runtime stage ------------------------------------------------------

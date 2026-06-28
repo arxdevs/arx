@@ -17,7 +17,7 @@ export default defineConfig({
     alias: { "@": path.resolve(__dirname, "src") },
   },
   build: {
-    outDir: process.env.ARX_WEB_OUT_DIR ?? "../crates/arx-server/web-dist",
+    outDir: "../crates/arx-server/web-dist",
     emptyOutDir: true,
   },
   server: {
