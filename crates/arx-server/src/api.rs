@@ -150,6 +150,8 @@ pub fn router(state: AppState) -> Router {
         )
         .merge(crate::github_routes::routes())
         .merge(crate::setup::routes())
+        .fallback(crate::web::spa_fallback)
+        .layer(axum::middleware::from_fn(crate::csrf::guard))
         .with_state(state)
 }
 
@@ -179,9 +181,14 @@ async fn get_me(Auth(user): Auth) -> Json<UserResp> {
     })
 }
 
-async fn post_logout(Auth(user): Auth, State(app): State<AppState>) -> ApiResult<()> {
+async fn post_logout(
+    Auth(user): Auth,
+    State(app): State<AppState>,
+) -> ApiResult<impl IntoResponse> {
     auth_q::revoke_session(&app.db, user.session_id).await?;
-    Ok(())
+    let secure = crate::web::cookie_is_secure(&app).await;
+    let clear = crate::web::clear_cookie(crate::auth::SESSION_COOKIE, secure);
+    Ok(([(axum::http::header::SET_COOKIE, clear)], ()))
 }
 
 #[derive(Deserialize)]

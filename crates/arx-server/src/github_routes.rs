@@ -1,14 +1,23 @@
 use crate::auth::Auth;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
+use crate::web;
+use arx_db::queries::auth::CreatedSession;
 use arx_db::queries::github as gh_q;
 use arx_github::verify_signature;
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::header::HeaderMap;
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use chrono::{Duration, Utc};
+use serde::Deserialize;
 use serde_json::json;
+use std::net::SocketAddr;
+
+const WEB_SESSION_DAYS: i64 = 30;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -17,6 +26,8 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/auth/github/oauth-info", get(oauth_info))
         .route("/v1/auth/github/exchange", post(oauth_exchange))
         .route("/v1/auth/github/device", post(device_exchange))
+        .route("/v1/auth/github/login", get(web_login))
+        .route("/v1/auth/github/callback", get(web_callback))
 }
 
 #[derive(serde::Serialize)]
@@ -106,6 +117,24 @@ async fn finalize_oauth(
     http: &reqwest::Client,
     access_token: &str,
 ) -> ApiResult<Json<ExchangeResp>> {
+    let (_, display_name, github_login, session) =
+        finalize_oauth_session(app, http, access_token, None).await?;
+    Ok(Json(ExchangeResp {
+        user: crate::api::UserResp {
+            id: session.user_id.as_uuid().to_string(),
+            display_name,
+            github_login: Some(github_login),
+        },
+        session_token: session.token_plaintext,
+    }))
+}
+
+async fn finalize_oauth_session(
+    app: &AppState,
+    http: &reqwest::Client,
+    access_token: &str,
+    expires_at: Option<chrono::DateTime<Utc>>,
+) -> ApiResult<(arx_core::ids::UserId, String, String, CreatedSession)> {
     let me: serde_json::Value = http
         .get("https://api.github.com/user")
         .header("authorization", format!("Bearer {access_token}"))
@@ -141,16 +170,197 @@ async fn finalize_oauth(
     )
     .await?;
 
-    let session = arx_db::queries::auth::issue_session(&app.db, user_id, Some("oauth")).await?;
+    let label = if expires_at.is_some() { "web" } else { "oauth" };
+    let session =
+        arx_db::queries::auth::issue_session_with_expiry(&app.db, user_id, Some(label), expires_at)
+            .await?;
 
-    Ok(Json(ExchangeResp {
-        user: crate::api::UserResp {
-            id: user_id.as_uuid().to_string(),
-            display_name,
-            github_login: Some(github_login),
+    Ok((user_id, display_name, github_login, session))
+}
+
+fn random_state() -> String {
+    use rand::RngCore;
+    let mut buf = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut buf);
+    hex::encode(buf)
+}
+
+fn login_rate_limit(addr: SocketAddr) -> ApiResult<()> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+    static LAST: OnceLock<Mutex<HashMap<std::net::IpAddr, Instant>>> = OnceLock::new();
+    const MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+    let map = LAST.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    let ip = addr.ip();
+    if let Some(prev) = guard.get(&ip) {
+        if now.duration_since(*prev) < MIN_INTERVAL {
+            return Err(ApiError::bad_request("rate limited; try again shortly"));
+        }
+    }
+    guard.insert(ip, now);
+    Ok(())
+}
+
+async fn web_login(
+    State(app): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> ApiResult<Response> {
+    login_rate_limit(addr)?;
+
+    let creds = gh_q::get_app(&app.db, &app.master_key)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("github app not configured"))?;
+
+    let settings = arx_db::queries::settings::get(&app.db).await?;
+    let base = settings
+        .admin_domain
+        .map(|d| format!("https://{d}"))
+        .ok_or_else(|| ApiError::bad_request("admin domain not configured"))?;
+    let redirect_uri = format!("{base}/v1/auth/github/callback");
+
+    let state = random_state();
+    app.remember_oauth_state(state.clone());
+
+    let scope = "read:user user:email";
+    let authorize_url = format!(
+        "https://github.com/login/oauth/authorize?client_id={cid}&redirect_uri={ru}&state={st}&scope={sc}",
+        cid = creds.client_id,
+        ru = urlencode(&redirect_uri),
+        st = urlencode(&state),
+        sc = urlencode(scope),
+    );
+
+    let secure = web::cookie_is_secure(&app).await;
+    let state_cookie = web::set_cookie("arx_oauth_state", &state, 300, secure);
+
+    Ok((
+        [(header::SET_COOKIE, state_cookie)],
+        Redirect::to(&authorize_url),
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+struct CallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+}
+
+async fn web_callback(
+    State(app): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<CallbackQuery>,
+) -> Response {
+    if login_rate_limit(addr).is_err() {
+        return (StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response();
+    }
+
+    if q.error.is_some() {
+        return (StatusCode::BAD_REQUEST, "github oauth was denied").into_response();
+    }
+
+    let (Some(code), Some(state)) = (q.code, q.state) else {
+        return (StatusCode::BAD_REQUEST, "missing code or state").into_response();
+    };
+
+    let cookie_state = cookie_value(&headers, "arx_oauth_state");
+    let cookie_ok = cookie_state
+        .as_deref()
+        .map(|c| constant_time_eq(c.as_bytes(), state.as_bytes()))
+        .unwrap_or(false);
+
+    if !cookie_ok || !app.take_oauth_state(&state) {
+        return (StatusCode::BAD_REQUEST, "invalid or expired oauth state").into_response();
+    }
+
+    let creds = match gh_q::get_app(&app.db, &app.master_key).await {
+        Ok(Some(c)) => c,
+        _ => return (StatusCode::BAD_REQUEST, "github app not configured").into_response(),
+    };
+
+    let http = match reqwest::Client::builder()
+        .user_agent("arx")
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+
+    let token_resp: serde_json::Value = match http
+        .post("https://github.com/login/oauth/access_token")
+        .header("accept", "application/json")
+        .form(&[
+            ("client_id", creds.client_id.as_str()),
+            ("client_secret", creds.client_secret.as_str()),
+            ("code", code.as_str()),
+        ])
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+    {
+        Ok(r) => match r.json().await {
+            Ok(v) => v,
+            Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
         },
-        session_token: session.token_plaintext,
-    }))
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+    };
+
+    let Some(access_token) = token_resp["access_token"].as_str() else {
+        return (StatusCode::BAD_REQUEST, "github oauth exchange failed").into_response();
+    };
+
+    let expires_at = Utc::now() + Duration::days(WEB_SESSION_DAYS);
+    let session = match finalize_oauth_session(&app, &http, access_token, Some(expires_at)).await {
+        Ok((_, _, _, s)) => s,
+        Err(e) => return (e.0, e.2).into_response(),
+    };
+
+    let secure = web::cookie_is_secure(&app).await;
+    let session_cookie = web::session_cookie(
+        &session.token_plaintext,
+        WEB_SESSION_DAYS * 24 * 60 * 60,
+        secure,
+    );
+    let clear_state = web::clear_cookie("arx_oauth_state", secure);
+
+    web::redirect_to_root(vec![session_cookie, clear_state])
+}
+
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    raw.split(';').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k.trim() == name).then(|| v.trim().to_string())
+    })
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+fn urlencode(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') {
+                c.to_string()
+            } else {
+                format!("%{:02X}", c as u32)
+            }
+        })
+        .collect()
 }
 
 async fn app_status(
