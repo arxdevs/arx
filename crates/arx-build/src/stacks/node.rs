@@ -6,11 +6,72 @@ use std::path::Path;
 
 const STATIC_DIST_DIR: &str = "dist";
 
-/// `printf` format string for the SPA nginx server block. It is single-quoted
-/// inside the generated `RUN`, so `${PORT}` and `$uri` reach the file verbatim;
-/// the nginx image's envsubst entrypoint then substitutes only defined env vars
-/// (`PORT`), leaving `$uri` for nginx itself.
 const NGINX_SPA_TEMPLATE: &str = "server {\\n  listen ${PORT};\\n  root /usr/share/nginx/html;\\n  index index.html;\\n  location / {\\n    try_files $uri $uri/ /index.html;\\n  }\\n}\\n";
+
+struct Prelude {
+    node_major: u8,
+    bun_install: &'static str,
+    corepack: String,
+    install_quoted: String,
+}
+
+enum Runtime {
+    Dynamic { start_json: String },
+    Static { dist_root: String },
+}
+
+impl Runtime {
+    fn is_static(&self) -> bool {
+        matches!(self, Runtime::Static { .. })
+    }
+
+    fn render(&self) -> Result<String, BuildError> {
+        match self {
+            Runtime::Dynamic { start_json } => Ok(format!("\n{}", dynamic_runtime(start_json))),
+            Runtime::Static { dist_root } => nginx_runtime(dist_root),
+        }
+    }
+}
+
+struct RenderPlan {
+    build_quoted: String,
+    sources: String,
+    runtime: Runtime,
+}
+
+fn dynamic_runtime(start_json: &str) -> String {
+    format!(
+        "ENV PORT=8080\n\
+         EXPOSE 8080\n\
+         CMD [\"sh\",\"-c\",{start_json}]\n"
+    )
+}
+
+fn nginx_runtime(dist_root: &str) -> Result<String, BuildError> {
+    if !validate::is_safe_copy_path(dist_root.trim_start_matches('/')) {
+        return Err(BuildError::InvalidInput {
+            field: "static_dist_root",
+            reason: "unsafe copy path".into(),
+        });
+    }
+    Ok(format!(
+        "\n\
+         FROM nginx:1-alpine\n\
+         COPY --from=build [\"{dist_root}\", \"/usr/share/nginx/html\"]\n\
+         RUN mkdir -p /etc/nginx/templates \\\n\
+             && printf '{NGINX_SPA_TEMPLATE}' > /etc/nginx/templates/default.conf.template\n\
+         ENV PORT=8080\n\
+         EXPOSE 8080\n"
+    ))
+}
+
+fn workspace_meta_copy_line(kind: WorkspaceKind) -> &'static str {
+    match kind {
+        WorkspaceKind::Pnpm => "COPY pnpm-workspace.yaml* ./\nCOPY turbo.json* ./\n",
+        WorkspaceKind::Turbo => "COPY turbo.json* ./\nCOPY pnpm-workspace.yaml* ./\n",
+        WorkspaceKind::NpmYarnBun => "COPY turbo.json* ./\n",
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pm {
@@ -79,6 +140,15 @@ impl Pm {
                  && ln -s /root/.bun/bin/bun /usr/local/bin/bun\n"
             }
             _ => "",
+        }
+    }
+
+    fn lockfile_copy_line(self) -> &'static str {
+        match self {
+            Pm::Pnpm => "COPY pnpm-lock.yaml* ./\n",
+            Pm::Npm => "COPY package-lock.json* ./\n",
+            Pm::Yarn => "COPY yarn.lock* ./\n",
+            Pm::Bun => "COPY bun.lockb* ./\n",
         }
     }
 }
@@ -211,48 +281,134 @@ impl StackBuilder for Node {
     }
 
     fn render_dockerfile(&self, ov: &CommandOverrides<'_>) -> Result<String, BuildError> {
-        if self.is_static_site(ov) {
-            return self.render_static(ov);
-        }
-        match &self.workspace {
-            None => self.render_single_app(ov),
-            Some(ws) => self.render_workspace(ov, ws),
-        }
+        self.render(ov)
     }
 }
 
 impl Node {
-    /// A package builds to a static site when it has a Vite build but nothing
-    /// to start: no `start` script and no `start_command` override. Setting a
-    /// `start_command` on the service always opts back into the dynamic path.
     fn is_static_site(&self, ov: &CommandOverrides<'_>) -> bool {
         if ov.start_command.is_some() || self.has_start_script {
             return false;
         }
-        if !self.uses_vite {
-            return false;
-        }
-        self.has_build_script || ov.build_command.is_some()
+        self.uses_vite && (self.has_build_script || ov.build_command.is_some())
     }
 
-    /// Dependency layer + sources for a workspace build: copy only the
-    /// workspace manifests and lockfile, install once into a cached layer, then
-    /// copy the full tree. Falls back to copy-all when manifests can't be
-    /// enumerated — a partial set would break `--frozen-lockfile`.
+    fn render(&self, ov: &CommandOverrides<'_>) -> Result<String, BuildError> {
+        let prelude = self.prelude()?;
+        let plan = self.plan(ov, &prelude)?;
+        let build_run = crate::stack::build_run_with_env(&plan.build_quoted);
+        let stage = self.build_stage(
+            &prelude,
+            &plan.sources,
+            plan.runtime.is_static(),
+            &build_run,
+        );
+        Ok(format!("{stage}{}", plan.runtime.render()?))
+    }
+
+    fn prelude(&self) -> Result<Prelude, BuildError> {
+        let install = self.pm.install_cmd(self.has_lock);
+        Ok(Prelude {
+            node_major: self.node_major,
+            bun_install: self.pm.base_image_extra(),
+            corepack: self.corepack_section(),
+            install_quoted: validate::shell_single_quote(install, "build_command")?,
+        })
+    }
+
+    fn plan(&self, ov: &CommandOverrides<'_>, prelude: &Prelude) -> Result<RenderPlan, BuildError> {
+        let filter = match &self.workspace {
+            Some(ws) => Some(workspace_filter_token(self.pm, ws)?),
+            None => None,
+        };
+        let default_build = self.default_build(ov, filter.as_deref());
+        let build_raw = ov.build_command.unwrap_or(&default_build);
+        let build_quoted = validate::shell_single_quote(build_raw, "build_command")?;
+
+        let sources = self.sources(&prelude.install_quoted);
+
+        let runtime = if self.is_static_site(ov) {
+            Runtime::Static {
+                dist_root: self.dist_root(),
+            }
+        } else {
+            let default_start = self.default_start(filter.as_deref());
+            let start_raw = ov.start_command.unwrap_or(&default_start);
+            Runtime::Dynamic {
+                start_json: validate::cmd_to_json_token(start_raw, "start_command")?,
+            }
+        };
+
+        Ok(RenderPlan {
+            build_quoted,
+            sources,
+            runtime,
+        })
+    }
+
+    fn default_build(&self, ov: &CommandOverrides<'_>, filter: Option<&str>) -> String {
+        match filter {
+            Some(f) => format!("{f} run build"),
+            None if self.is_static_site(ov) => self.pm.run_build_cmd().to_string(),
+            None => self.pm.install_cmd(self.has_lock).to_string(),
+        }
+    }
+
+    fn default_start(&self, filter: Option<&str>) -> String {
+        match filter {
+            Some(f) => format!("{f} run start"),
+            None if self.has_start_script => self.pm.run_cmd().to_string(),
+            None => "node index.js".to_string(),
+        }
+    }
+
+    fn sources(&self, install_quoted: &str) -> String {
+        match &self.workspace {
+            Some(ws) => self.workspace_dependency_layer(ws, install_quoted),
+            None => format!(
+                "COPY . .\n\
+                 RUN sh -c '{install_quoted}'\n"
+            ),
+        }
+    }
+
+    fn build_stage(
+        &self,
+        prelude: &Prelude,
+        sources: &str,
+        as_build: bool,
+        build_run: &str,
+    ) -> String {
+        let Prelude {
+            node_major,
+            bun_install,
+            corepack,
+            ..
+        } = prelude;
+        let stage = if as_build { " AS build" } else { "" };
+        format!(
+            "# syntax=docker/dockerfile:1.7\n\
+             FROM node:{node_major}-bookworm-slim{stage}\n\
+             WORKDIR /app\n\
+             {bun_install}\
+             {corepack}\
+             {sources}\
+             {build_run}"
+        )
+    }
+
+    fn dist_root(&self) -> String {
+        match &self.workspace {
+            Some(ws) => format!("/app/{}/{STATIC_DIST_DIR}", ws.package_rel_path),
+            None => format!("/app/{STATIC_DIST_DIR}"),
+        }
+    }
+
     fn workspace_dependency_layer(&self, ws: &WorkspaceContext, install_quoted: &str) -> String {
         match manifest_copy_lines(&ws.workspace_manifests) {
             Some(manifests) => {
-                let lockfile_line = match self.pm {
-                    Pm::Pnpm => "COPY pnpm-lock.yaml* ./\n",
-                    Pm::Npm => "COPY package-lock.json* ./\n",
-                    Pm::Yarn => "COPY yarn.lock* ./\n",
-                    Pm::Bun => "COPY bun.lockb* ./\n",
-                };
-                let workspace_meta_line = match ws.kind {
-                    WorkspaceKind::Pnpm => "COPY pnpm-workspace.yaml* ./\nCOPY turbo.json* ./\n",
-                    WorkspaceKind::Turbo => "COPY turbo.json* ./\nCOPY pnpm-workspace.yaml* ./\n",
-                    WorkspaceKind::NpmYarnBun => "COPY turbo.json* ./\n",
-                };
+                let lockfile_line = self.pm.lockfile_copy_line();
+                let workspace_meta_line = workspace_meta_copy_line(ws.kind);
                 format!(
                     "COPY package.json ./\n\
                      {lockfile_line}\
@@ -267,145 +423,6 @@ impl Node {
                  RUN sh -c '{install_quoted}'\n"
             ),
         }
-    }
-
-    /// Two-stage build: the usual Node/workspace build stage, then an
-    /// nginx:1-alpine runtime serving the Vite `dist/` output with an SPA
-    /// fallback. `listen ${PORT}` goes through the nginx image's envsubst
-    /// templates so the runtime port follows the service `PORT` variable,
-    /// matching the TCP healthcheck and traefik routing.
-    fn render_static(&self, ov: &CommandOverrides<'_>) -> Result<String, BuildError> {
-        let node_major = self.node_major;
-        let corepack = self.corepack_section();
-        let bun_install = self.pm.base_image_extra();
-        let install_cmd = self.pm.install_cmd(self.has_lock);
-        let install_quoted = validate::shell_single_quote(install_cmd, "build_command")?;
-
-        let (default_build, dist_src, sources) = match &self.workspace {
-            Some(ws) => {
-                let filter = workspace_filter_token(self.pm, ws)?;
-                let path = ws.package_rel_path.as_str();
-                if !validate::is_safe_copy_path(path) {
-                    return Err(BuildError::InvalidInput {
-                        field: "workspace_package_path",
-                        reason: "invalid package path".into(),
-                    });
-                }
-                (
-                    format!("{filter} run build"),
-                    format!("/app/{path}/{STATIC_DIST_DIR}"),
-                    self.workspace_dependency_layer(ws, &install_quoted),
-                )
-            }
-            None => (
-                self.pm.run_build_cmd().to_string(),
-                format!("/app/{STATIC_DIST_DIR}"),
-                format!(
-                    "COPY . .\n\
-                     RUN sh -c '{install_quoted}'\n"
-                ),
-            ),
-        };
-
-        let build_raw = ov.build_command.unwrap_or(default_build.as_str());
-        let build_quoted = validate::shell_single_quote(build_raw, "build_command")?;
-        let build_run = crate::stack::build_run_with_env(&build_quoted);
-
-        Ok(format!(
-            "# syntax=docker/dockerfile:1.7\n\
-             FROM node:{node_major}-bookworm-slim AS build\n\
-             WORKDIR /app\n\
-             {bun_install}\
-             {corepack}\
-             {sources}\
-             {build_run}\n\
-             \n\
-             FROM nginx:1-alpine\n\
-             COPY --from=build [\"{dist_src}\", \"/usr/share/nginx/html\"]\n\
-             RUN mkdir -p /etc/nginx/templates \\\n\
-                 && printf '{NGINX_SPA_TEMPLATE}' > /etc/nginx/templates/default.conf.template\n\
-             ENV PORT=8080\n\
-             EXPOSE 8080\n"
-        ))
-    }
-}
-
-impl Node {
-    fn render_single_app(&self, ov: &CommandOverrides<'_>) -> Result<String, BuildError> {
-        let default_build = self.pm.install_cmd(self.has_lock);
-        let default_start = if self.has_start_script {
-            self.pm.run_cmd().to_string()
-        } else {
-            "node index.js".to_string()
-        };
-
-        let build_raw = ov.build_command.unwrap_or(default_build);
-        let start_raw = ov.start_command.unwrap_or(default_start.as_str());
-
-        let build_quoted = validate::shell_single_quote(build_raw, "build_command")?;
-        let build_run = crate::stack::build_run_with_env(&build_quoted);
-        let start_json = validate::cmd_to_json_token(start_raw, "start_command")?;
-        let node_major = self.node_major;
-
-        let corepack = self.corepack_section();
-        let bun_install = self.pm.base_image_extra();
-
-        Ok(format!(
-            "# syntax=docker/dockerfile:1.7\n\
-             FROM node:{node_major}-bookworm-slim\n\
-             WORKDIR /app\n\
-             {bun_install}\
-             {corepack}\
-             COPY . .\n\
-             {build_run}\n\
-             ENV PORT=8080\n\
-             EXPOSE 8080\n\
-             CMD [\"sh\",\"-c\",{start_json}]\n"
-        ))
-    }
-
-    fn render_workspace(
-        &self,
-        ov: &CommandOverrides<'_>,
-        ws: &WorkspaceContext,
-    ) -> Result<String, BuildError> {
-        let filter = workspace_filter_token(self.pm, ws)?;
-        let install_cmd = self.pm.install_cmd(self.has_lock);
-        // Install runs once in its own layer (below); the build step only builds.
-        let default_build = format!("{filter} run build");
-        let default_start = format!("{filter} run start");
-
-        let build_raw = ov.build_command.unwrap_or(default_build.as_str());
-        let start_raw = ov.start_command.unwrap_or(default_start.as_str());
-
-        let build_quoted = validate::shell_single_quote(build_raw, "build_command")?;
-        let build_run = crate::stack::build_run_with_env(&build_quoted);
-        let start_json = validate::cmd_to_json_token(start_raw, "start_command")?;
-        let install_quoted = validate::shell_single_quote(install_cmd, "build_command")?;
-        let node_major = self.node_major;
-        let corepack = self.corepack_section();
-        let bun_install = self.pm.base_image_extra();
-
-        let header = format!(
-            "# syntax=docker/dockerfile:1.7\n\
-             FROM node:{node_major}-bookworm-slim\n\
-             WORKDIR /app\n\
-             {bun_install}\
-             {corepack}"
-        );
-        let footer = format!(
-            "ENV PORT=8080\n\
-             EXPOSE 8080\n\
-             CMD [\"sh\",\"-c\",{start_json}]\n"
-        );
-
-        // Dependency layer: copy only the workspace manifests + lockfile, then a
-        // single install. This caches across source-only changes and avoids the
-        // double-install (root-only pre-install + full install) that corrupts
-        // pnpm's store and empties node_modules.
-        let sources = self.workspace_dependency_layer(ws, &install_quoted);
-
-        Ok(format!("{header}{sources}{build_run}\n{footer}"))
     }
 }
 
