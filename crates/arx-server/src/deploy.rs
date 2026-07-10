@@ -349,7 +349,7 @@ fn compute_config_hash(
     // cache). `build_env` is sorted by the caller for a stable hash.
     for (k, v) in build_env {
         h.update(k.as_bytes());
-        h.update([b'=']);
+        h.update(b"=");
         h.update(v.as_bytes());
         h.update([0u8]);
     }
