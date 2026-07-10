@@ -367,6 +367,46 @@ mod tests {
     }
 
     #[test]
+    fn vite_package_without_start_renders_static_nginx_dockerfile() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - 'apps/*'\n  - 'packages/*'\n",
+        )
+        .unwrap();
+        fs::write(root.join("pnpm-lock.yaml"), "lockfileVersion: 9").unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","private":true}"#,
+        )
+        .unwrap();
+        let pkg = root.join("apps/kiosk");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(
+            pkg.join("package.json"),
+            r#"{"name":"kiosk","scripts":{"build":"tsc --noEmit && vite build"},"devDependencies":{"vite":"^6.0.5"}}"#,
+        )
+        .unwrap();
+
+        let layout = monorepo::detect(root, Some(Path::new("apps/kiosk"))).unwrap();
+        let stack = build_stack(&pkg, Some(&layout)).expect("stack");
+        let text = stack
+            .render_dockerfile(&CommandOverrides::default())
+            .unwrap();
+
+        assert!(text.contains("pnpm --filter ./apps/kiosk run build"));
+        assert!(text.contains("FROM nginx:1-alpine"));
+        assert!(
+            text.contains(
+                "COPY --from=build [\"/app/apps/kiosk/dist\", \"/usr/share/nginx/html\"]"
+            )
+        );
+        assert!(text.contains("try_files $uri $uri/ /index.html;"));
+        assert!(!text.contains("run start"));
+    }
+
+    #[test]
     fn root_lockfile_overrides_package_lockfile_in_monorepo() {
         let dir = tempdir().unwrap();
         let root = dir.path();

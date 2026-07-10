@@ -4,6 +4,75 @@ use crate::validate::{self, BuildError};
 use serde_json::Value;
 use std::path::Path;
 
+const STATIC_DIST_DIR: &str = "dist";
+
+const NGINX_SPA_TEMPLATE: &str = "server {\\n  listen ${PORT};\\n  root /usr/share/nginx/html;\\n  index index.html;\\n  location / {\\n    try_files $uri $uri/ /index.html;\\n  }\\n}\\n";
+
+struct Prelude {
+    node_major: u8,
+    bun_install: &'static str,
+    corepack: String,
+    install_quoted: String,
+}
+
+enum Runtime {
+    Dynamic { start_json: String },
+    Static { dist_root: String },
+}
+
+impl Runtime {
+    fn is_static(&self) -> bool {
+        matches!(self, Runtime::Static { .. })
+    }
+
+    fn render(&self) -> Result<String, BuildError> {
+        match self {
+            Runtime::Dynamic { start_json } => Ok(format!("\n{}", dynamic_runtime(start_json))),
+            Runtime::Static { dist_root } => nginx_runtime(dist_root),
+        }
+    }
+}
+
+struct RenderPlan {
+    build_quoted: String,
+    sources: String,
+    runtime: Runtime,
+}
+
+fn dynamic_runtime(start_json: &str) -> String {
+    format!(
+        "ENV PORT=8080\n\
+         EXPOSE 8080\n\
+         CMD [\"sh\",\"-c\",{start_json}]\n"
+    )
+}
+
+fn nginx_runtime(dist_root: &str) -> Result<String, BuildError> {
+    if !validate::is_safe_copy_path(dist_root.trim_start_matches('/')) {
+        return Err(BuildError::InvalidInput {
+            field: "static_dist_root",
+            reason: "unsafe copy path".into(),
+        });
+    }
+    Ok(format!(
+        "\n\
+         FROM nginx:1-alpine\n\
+         COPY --from=build [\"{dist_root}\", \"/usr/share/nginx/html\"]\n\
+         RUN mkdir -p /etc/nginx/templates \\\n\
+             && printf '{NGINX_SPA_TEMPLATE}' > /etc/nginx/templates/default.conf.template\n\
+         ENV PORT=8080\n\
+         EXPOSE 8080\n"
+    ))
+}
+
+fn workspace_meta_copy_line(kind: WorkspaceKind) -> &'static str {
+    match kind {
+        WorkspaceKind::Pnpm => "COPY pnpm-workspace.yaml* ./\nCOPY turbo.json* ./\n",
+        WorkspaceKind::Turbo => "COPY turbo.json* ./\nCOPY pnpm-workspace.yaml* ./\n",
+        WorkspaceKind::NpmYarnBun => "COPY turbo.json* ./\n",
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pm {
     Npm,
@@ -31,6 +100,15 @@ impl Pm {
             Pm::Pnpm => "pnpm start",
             Pm::Yarn => "yarn start",
             Pm::Bun => "bun start",
+        }
+    }
+
+    fn run_build_cmd(self) -> &'static str {
+        match self {
+            Pm::Npm => "npm run build",
+            Pm::Pnpm => "pnpm run build",
+            Pm::Yarn => "yarn run build",
+            Pm::Bun => "bun run build",
         }
     }
 
@@ -64,6 +142,15 @@ impl Pm {
             _ => "",
         }
     }
+
+    fn lockfile_copy_line(self) -> &'static str {
+        match self {
+            Pm::Pnpm => "COPY pnpm-lock.yaml* ./\n",
+            Pm::Npm => "COPY package-lock.json* ./\n",
+            Pm::Yarn => "COPY yarn.lock* ./\n",
+            Pm::Bun => "COPY bun.lockb* ./\n",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -72,6 +159,8 @@ pub struct Node {
     pm: Pm,
     has_lock: bool,
     has_start_script: bool,
+    has_build_script: bool,
+    uses_vite: bool,
     /// Sanitized `packageManager` spec (e.g. `pnpm@9.0.0`) when the repo pins
     /// one. Honored over the pinned default so builds match the lockfile's PM.
     pm_spec: Option<String>,
@@ -136,7 +225,17 @@ impl Node {
             .and_then(|v| v.get("node"))
             .and_then(|v| v.as_str())
             .map(String::from);
-        let has_start_script = pkg.get("scripts").and_then(|v| v.get("start")).is_some();
+        let scripts = pkg.get("scripts");
+        let has_start_script = scripts.and_then(|v| v.get("start")).is_some();
+        let has_build_script = scripts.and_then(|v| v.get("build")).is_some();
+        let build_script = scripts
+            .and_then(|v| v.get("build"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let uses_vite = ["dependencies", "devDependencies"]
+            .iter()
+            .any(|k| pkg.get(k).and_then(|d| d.get("vite")).is_some())
+            || build_script.contains("vite build");
         let pm_spec = pkg
             .get("packageManager")
             .and_then(|v| v.as_str())
@@ -162,6 +261,8 @@ impl Node {
             pm,
             has_lock,
             has_start_script,
+            has_build_script,
+            uses_vite,
             pm_spec,
             workspace: None,
         }))
@@ -180,119 +281,148 @@ impl StackBuilder for Node {
     }
 
     fn render_dockerfile(&self, ov: &CommandOverrides<'_>) -> Result<String, BuildError> {
-        match &self.workspace {
-            None => self.render_single_app(ov),
-            Some(ws) => self.render_workspace(ov, ws),
-        }
+        self.render(ov)
     }
 }
 
 impl Node {
-    fn render_single_app(&self, ov: &CommandOverrides<'_>) -> Result<String, BuildError> {
-        let default_build = self.pm.install_cmd(self.has_lock);
-        let default_start = if self.has_start_script {
-            self.pm.run_cmd().to_string()
+    fn is_static_site(&self, ov: &CommandOverrides<'_>) -> bool {
+        if ov.start_command.is_some() || self.has_start_script {
+            return false;
+        }
+        self.uses_vite && (self.has_build_script || ov.build_command.is_some())
+    }
+
+    fn render(&self, ov: &CommandOverrides<'_>) -> Result<String, BuildError> {
+        let prelude = self.prelude()?;
+        let plan = self.plan(ov, &prelude)?;
+        let build_run = crate::stack::build_run_with_env(&plan.build_quoted);
+        let stage = self.build_stage(
+            &prelude,
+            &plan.sources,
+            plan.runtime.is_static(),
+            &build_run,
+        );
+        Ok(format!("{stage}{}", plan.runtime.render()?))
+    }
+
+    fn prelude(&self) -> Result<Prelude, BuildError> {
+        let install = self.pm.install_cmd(self.has_lock);
+        Ok(Prelude {
+            node_major: self.node_major,
+            bun_install: self.pm.base_image_extra(),
+            corepack: self.corepack_section(),
+            install_quoted: validate::shell_single_quote(install, "build_command")?,
+        })
+    }
+
+    fn plan(&self, ov: &CommandOverrides<'_>, prelude: &Prelude) -> Result<RenderPlan, BuildError> {
+        let filter = match &self.workspace {
+            Some(ws) => Some(workspace_filter_token(self.pm, ws)?),
+            None => None,
+        };
+        let default_build = self.default_build(ov, filter.as_deref());
+        let build_raw = ov.build_command.unwrap_or(&default_build);
+        let build_quoted = validate::shell_single_quote(build_raw, "build_command")?;
+
+        let sources = self.sources(&prelude.install_quoted);
+
+        let runtime = if self.is_static_site(ov) {
+            Runtime::Static {
+                dist_root: self.dist_root(),
+            }
         } else {
-            "node index.js".to_string()
+            let default_start = self.default_start(filter.as_deref());
+            let start_raw = ov.start_command.unwrap_or(&default_start);
+            Runtime::Dynamic {
+                start_json: validate::cmd_to_json_token(start_raw, "start_command")?,
+            }
         };
 
-        let build_raw = ov.build_command.unwrap_or(default_build);
-        let start_raw = ov.start_command.unwrap_or(default_start.as_str());
+        Ok(RenderPlan {
+            build_quoted,
+            sources,
+            runtime,
+        })
+    }
 
-        let build_quoted = validate::shell_single_quote(build_raw, "build_command")?;
-        let build_run = crate::stack::build_run_with_env(&build_quoted);
-        let start_json = validate::cmd_to_json_token(start_raw, "start_command")?;
-        let node_major = self.node_major;
+    fn default_build(&self, ov: &CommandOverrides<'_>, filter: Option<&str>) -> String {
+        match filter {
+            Some(f) => format!("{f} run build"),
+            None if self.is_static_site(ov) => self.pm.run_build_cmd().to_string(),
+            None => self.pm.install_cmd(self.has_lock).to_string(),
+        }
+    }
 
-        let corepack = self.corepack_section();
-        let bun_install = self.pm.base_image_extra();
+    fn default_start(&self, filter: Option<&str>) -> String {
+        match filter {
+            Some(f) => format!("{f} run start"),
+            None if self.has_start_script => self.pm.run_cmd().to_string(),
+            None => "node index.js".to_string(),
+        }
+    }
 
-        Ok(format!(
+    fn sources(&self, install_quoted: &str) -> String {
+        match &self.workspace {
+            Some(ws) => self.workspace_dependency_layer(ws, install_quoted),
+            None => format!(
+                "COPY . .\n\
+                 RUN sh -c '{install_quoted}'\n"
+            ),
+        }
+    }
+
+    fn build_stage(
+        &self,
+        prelude: &Prelude,
+        sources: &str,
+        as_build: bool,
+        build_run: &str,
+    ) -> String {
+        let Prelude {
+            node_major,
+            bun_install,
+            corepack,
+            ..
+        } = prelude;
+        let stage = if as_build { " AS build" } else { "" };
+        format!(
             "# syntax=docker/dockerfile:1.7\n\
-             FROM node:{node_major}-bookworm-slim\n\
+             FROM node:{node_major}-bookworm-slim{stage}\n\
              WORKDIR /app\n\
              {bun_install}\
              {corepack}\
-             COPY . .\n\
-             {build_run}\n\
-             ENV PORT=8080\n\
-             EXPOSE 8080\n\
-             CMD [\"sh\",\"-c\",{start_json}]\n"
-        ))
+             {sources}\
+             {build_run}"
+        )
     }
 
-    fn render_workspace(
-        &self,
-        ov: &CommandOverrides<'_>,
-        ws: &WorkspaceContext,
-    ) -> Result<String, BuildError> {
-        let filter = workspace_filter_token(self.pm, ws)?;
-        let install_cmd = self.pm.install_cmd(self.has_lock);
-        // Install runs once in its own layer (below); the build step only builds.
-        let default_build = format!("{filter} run build");
-        let default_start = format!("{filter} run start");
+    fn dist_root(&self) -> String {
+        match &self.workspace {
+            Some(ws) => format!("/app/{}/{STATIC_DIST_DIR}", ws.package_rel_path),
+            None => format!("/app/{STATIC_DIST_DIR}"),
+        }
+    }
 
-        let build_raw = ov.build_command.unwrap_or(default_build.as_str());
-        let start_raw = ov.start_command.unwrap_or(default_start.as_str());
-
-        let build_quoted = validate::shell_single_quote(build_raw, "build_command")?;
-        let build_run = crate::stack::build_run_with_env(&build_quoted);
-        let start_json = validate::cmd_to_json_token(start_raw, "start_command")?;
-        let install_quoted = validate::shell_single_quote(install_cmd, "build_command")?;
-        let node_major = self.node_major;
-        let corepack = self.corepack_section();
-        let bun_install = self.pm.base_image_extra();
-
-        let header = format!(
-            "# syntax=docker/dockerfile:1.7\n\
-             FROM node:{node_major}-bookworm-slim\n\
-             WORKDIR /app\n\
-             {bun_install}\
-             {corepack}"
-        );
-        let footer = format!(
-            "ENV PORT=8080\n\
-             EXPOSE 8080\n\
-             CMD [\"sh\",\"-c\",{start_json}]\n"
-        );
-
-        // Dependency layer: copy only the workspace manifests + lockfile, then a
-        // single install. This caches across source-only changes and avoids the
-        // double-install (root-only pre-install + full install) that corrupts
-        // pnpm's store and empties node_modules. Fall back to copying the whole
-        // tree when manifests can't be enumerated — a partial set would break
-        // `--frozen-lockfile`.
-        let body = match manifest_copy_lines(&ws.workspace_manifests) {
+    fn workspace_dependency_layer(&self, ws: &WorkspaceContext, install_quoted: &str) -> String {
+        match manifest_copy_lines(&ws.workspace_manifests) {
             Some(manifests) => {
-                let lockfile_line = match self.pm {
-                    Pm::Pnpm => "COPY pnpm-lock.yaml* ./\n",
-                    Pm::Npm => "COPY package-lock.json* ./\n",
-                    Pm::Yarn => "COPY yarn.lock* ./\n",
-                    Pm::Bun => "COPY bun.lockb* ./\n",
-                };
-                let workspace_meta_line = match ws.kind {
-                    WorkspaceKind::Pnpm => "COPY pnpm-workspace.yaml* ./\nCOPY turbo.json* ./\n",
-                    WorkspaceKind::Turbo => "COPY turbo.json* ./\nCOPY pnpm-workspace.yaml* ./\n",
-                    WorkspaceKind::NpmYarnBun => "COPY turbo.json* ./\n",
-                };
+                let lockfile_line = self.pm.lockfile_copy_line();
+                let workspace_meta_line = workspace_meta_copy_line(ws.kind);
                 format!(
                     "COPY package.json ./\n\
                      {lockfile_line}\
                      {workspace_meta_line}\
                      {manifests}\
                      RUN sh -c '{install_quoted}'\n\
-                     COPY . .\n\
-                     {build_run}\n"
+                     COPY . .\n"
                 )
             }
             None => format!(
                 "COPY . .\n\
-                 RUN sh -c '{install_quoted}'\n\
-                 {build_run}\n"
+                 RUN sh -c '{install_quoted}'\n"
             ),
-        };
-
-        Ok(format!("{header}{body}{footer}"))
+        }
     }
 }
 
@@ -402,6 +532,8 @@ mod tests {
             pm: Pm::Pnpm,
             has_lock: true,
             has_start_script: true,
+            has_build_script: true,
+            uses_vite: false,
             pm_spec: None,
             workspace: None,
         };
@@ -413,12 +545,140 @@ mod tests {
     }
 
     #[test]
+    fn static_spa_single_app_renders_nginx_stage() {
+        let n = Node {
+            node_major: 22,
+            pm: Pm::Pnpm,
+            has_lock: true,
+            has_start_script: false,
+            has_build_script: true,
+            uses_vite: true,
+            pm_spec: None,
+            workspace: None,
+        };
+        let out = render(n);
+        assert!(out.contains("FROM node:22-bookworm-slim AS build"));
+        assert!(out.contains("pnpm run build"));
+        assert!(out.contains("--mount=type=secret,id=arx_env"));
+        assert!(out.contains("FROM nginx:1-alpine"));
+        assert!(out.contains("COPY --from=build [\"/app/dist\", \"/usr/share/nginx/html\"]"));
+        assert!(out.contains("/etc/nginx/templates/default.conf.template"));
+        assert!(out.contains("listen ${PORT};"));
+        assert!(out.contains("try_files $uri $uri/ /index.html;"));
+        assert!(out.contains("ENV PORT=8080"));
+        assert!(!out.contains("CMD ["));
+    }
+
+    #[test]
+    fn static_spa_workspace_builds_package_and_copies_its_dist() {
+        let n = Node {
+            node_major: 24,
+            pm: Pm::Pnpm,
+            has_lock: true,
+            has_start_script: false,
+            has_build_script: true,
+            uses_vite: true,
+            pm_spec: None,
+            workspace: Some(workspace(WorkspaceKind::Pnpm, "apps/kiosk", Some("kiosk"))),
+        };
+        let out = render(n);
+        assert!(out.contains("pnpm --filter ./apps/kiosk run build"));
+        assert!(
+            out.contains("COPY --from=build [\"/app/apps/kiosk/dist\", \"/usr/share/nginx/html\"]")
+        );
+        assert!(out.contains("COPY pnpm-lock.yaml*"));
+        assert!(out.contains("COPY pnpm-workspace.yaml*"));
+        assert_eq!(out.matches("pnpm install --frozen-lockfile").count(), 1);
+        assert!(!out.contains("run start"));
+    }
+
+    #[test]
+    fn static_spa_respects_build_command_override() {
+        let n = Node {
+            node_major: 22,
+            pm: Pm::Pnpm,
+            has_lock: true,
+            has_start_script: false,
+            has_build_script: true,
+            uses_vite: true,
+            pm_spec: None,
+            workspace: Some(workspace(WorkspaceKind::Pnpm, "apps/web", Some("web"))),
+        };
+        let out = n
+            .render_dockerfile(&CommandOverrides {
+                build_command: Some("pnpm turbo build --filter=web"),
+                start_command: None,
+            })
+            .unwrap();
+        assert!(out.contains("pnpm turbo build --filter=web"));
+        assert!(out.contains("FROM nginx:1-alpine"));
+    }
+
+    #[test]
+    fn start_command_override_opts_out_of_static() {
+        let n = Node {
+            node_major: 22,
+            pm: Pm::Pnpm,
+            has_lock: true,
+            has_start_script: false,
+            has_build_script: true,
+            uses_vite: true,
+            pm_spec: None,
+            workspace: Some(workspace(WorkspaceKind::Pnpm, "apps/web", Some("web"))),
+        };
+        let out = n
+            .render_dockerfile(&CommandOverrides {
+                build_command: None,
+                start_command: Some("npx serve dist"),
+            })
+            .unwrap();
+        assert!(!out.contains("FROM nginx"));
+        assert!(out.contains("CMD [\"sh\",\"-c\",\"npx serve dist\"]"));
+    }
+
+    #[test]
+    fn start_script_keeps_dynamic_path_even_with_vite() {
+        let n = Node {
+            node_major: 22,
+            pm: Pm::Pnpm,
+            has_lock: true,
+            has_start_script: true,
+            has_build_script: true,
+            uses_vite: true,
+            pm_spec: None,
+            workspace: None,
+        };
+        let out = render(n);
+        assert!(!out.contains("FROM nginx"));
+        assert!(out.contains("CMD [\"sh\",\"-c\",\"pnpm start\"]"));
+    }
+
+    #[test]
+    fn no_vite_no_start_stays_dynamic() {
+        let n = Node {
+            node_major: 22,
+            pm: Pm::Npm,
+            has_lock: true,
+            has_start_script: false,
+            has_build_script: true,
+            uses_vite: false,
+            pm_spec: None,
+            workspace: None,
+        };
+        let out = render(n);
+        assert!(!out.contains("FROM nginx"));
+        assert!(out.contains("CMD [\"sh\",\"-c\",\"node index.js\"]"));
+    }
+
+    #[test]
     fn workspace_pnpm_uses_path_filter() {
         let n = Node {
             node_major: 22,
             pm: Pm::Pnpm,
             has_lock: true,
             has_start_script: true,
+            has_build_script: true,
+            uses_vite: false,
             pm_spec: None,
             workspace: Some(workspace(WorkspaceKind::Pnpm, "apps/web", Some("web"))),
         };
@@ -436,6 +696,8 @@ mod tests {
             pm: Pm::Bun,
             has_lock: true,
             has_start_script: true,
+            has_build_script: true,
+            uses_vite: false,
             pm_spec: None,
             workspace: Some(workspace(
                 WorkspaceKind::NpmYarnBun,
@@ -456,6 +718,8 @@ mod tests {
             pm: Pm::Npm,
             has_lock: true,
             has_start_script: true,
+            has_build_script: true,
+            uses_vite: false,
             pm_spec: None,
             workspace: Some(workspace(
                 WorkspaceKind::NpmYarnBun,
@@ -474,6 +738,8 @@ mod tests {
             pm: Pm::Yarn,
             has_lock: true,
             has_start_script: true,
+            has_build_script: true,
+            uses_vite: false,
             pm_spec: None,
             workspace: Some(workspace(WorkspaceKind::NpmYarnBun, "apps/web", None)),
         };
@@ -496,6 +762,8 @@ mod tests {
             pm: Pm::Yarn,
             has_lock: true,
             has_start_script: true,
+            has_build_script: true,
+            uses_vite: false,
             pm_spec: None,
             workspace: Some(workspace(
                 WorkspaceKind::NpmYarnBun,
@@ -520,6 +788,8 @@ mod tests {
             pm: Pm::Pnpm,
             has_lock: true,
             has_start_script: true,
+            has_build_script: true,
+            uses_vite: false,
             pm_spec: Some("pnpm@9.0.0".to_string()),
             workspace: Some(workspace(WorkspaceKind::Pnpm, "apps/web", Some("web"))),
         };
@@ -536,6 +806,8 @@ mod tests {
             pm: Pm::Pnpm,
             has_lock: true,
             has_start_script: true,
+            has_build_script: true,
+            uses_vite: false,
             pm_spec: None,
             workspace: Some(workspace(WorkspaceKind::Pnpm, "apps/web", Some("web"))),
         };
@@ -552,6 +824,8 @@ mod tests {
             pm: Pm::Pnpm,
             has_lock: true,
             has_start_script: true,
+            has_build_script: true,
+            uses_vite: false,
             pm_spec: Some("yarn@4.1.0".to_string()),
             workspace: Some(workspace(WorkspaceKind::Pnpm, "apps/web", Some("web"))),
         };
@@ -567,6 +841,8 @@ mod tests {
             pm: Pm::Pnpm,
             has_lock: true,
             has_start_script: true,
+            has_build_script: true,
+            uses_vite: false,
             pm_spec: None,
             workspace: Some(WorkspaceContext {
                 kind: WorkspaceKind::Pnpm,
@@ -597,6 +873,8 @@ mod tests {
             pm: Pm::Pnpm,
             has_lock: true,
             has_start_script: true,
+            has_build_script: true,
+            uses_vite: false,
             pm_spec: None,
             workspace: Some(WorkspaceContext {
                 kind: WorkspaceKind::Pnpm,
@@ -622,6 +900,8 @@ mod tests {
             pm: Pm::Pnpm,
             has_lock: true,
             has_start_script: true,
+            has_build_script: true,
+            uses_vite: false,
             pm_spec: None,
             workspace: Some(WorkspaceContext {
                 kind: WorkspaceKind::Pnpm,

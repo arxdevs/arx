@@ -14,6 +14,8 @@ arx project create --slug demo --name Demo
 
 # 2. Service from a GitHub repo. arx auto-detects the stack
 #    (JVM, Node, Python, Go, Rust) or uses a root Dockerfile as-is.
+#    A Node package using Vite with no start script deploys as a static
+#    SPA behind nginx (dist/ with index.html fallback) automatically.
 arx service create --slug web --name Web --kind git \
     --repo your-org/your-repo --branch main
 
