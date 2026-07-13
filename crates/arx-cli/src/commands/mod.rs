@@ -989,7 +989,6 @@ pub(crate) async fn dispatch(
             tail,
             since,
         } => {
-            use futures::StreamExt;
             let w = ws(cli.workspace.as_deref())?;
             let p = pr(cli.project.as_deref())?;
             let env = cli.env.unwrap_or_else(|| "production".into());
@@ -1008,47 +1007,24 @@ pub(crate) async fn dispatch(
                     )),
                 }
             }
-            let mut req = client.http.get(&url).header("accept", "text/event-stream");
-            if let Some(t) = &client.token {
-                req = req.bearer_auth(t);
+            client.stream_sse_lines(&url).await?;
+        }
+        Command::BuildLogs {
+            service,
+            follow,
+            deployment,
+        } => {
+            let w = ws(cli.workspace.as_deref())?;
+            let p = pr(cli.project.as_deref())?;
+            let env = cli.env.unwrap_or_else(|| "production".into());
+            let mut url = format!(
+                "{}/v1/workspaces/{w}/projects/{p}/services/{service}/build-logs?env={env}&follow={follow}",
+                client.server.trim_end_matches('/')
+            );
+            if let Some(d) = &deployment {
+                url.push_str(&format!("&deployment={d}"));
             }
-            let resp = req
-                .send()
-                .await
-                .map_err(|e| CliError::Network(e.to_string()))?;
-            if !resp.status().is_success() {
-                bail!(CliError::Server(format!(
-                    "status {}: {}",
-                    resp.status(),
-                    resp.text().await.unwrap_or_default()
-                )));
-            }
-            let mut stream = resp.bytes_stream();
-            let mut buf: Vec<u8> = Vec::new();
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|e| CliError::Network(e.to_string()))?;
-                buf.extend_from_slice(&chunk);
-                while let Some(pos) = buf.windows(2).position(|w| w == b"\n\n") {
-                    let event_bytes: Vec<u8> = buf.drain(..pos + 2).collect();
-                    let text = String::from_utf8_lossy(&event_bytes);
-                    for line in text.lines() {
-                        if let Some(data) = line
-                            .strip_prefix("data: ")
-                            .or_else(|| line.strip_prefix("data:"))
-                        {
-                            match serde_json::from_str::<Value>(data.trim()) {
-                                Ok(v) => {
-                                    if let Some(line_text) = v.get("line").and_then(|x| x.as_str())
-                                    {
-                                        println!("{line_text}");
-                                    }
-                                }
-                                Err(_) => println!("{data}"),
-                            }
-                        }
-                    }
-                }
-            }
+            client.stream_sse_lines(&url).await?;
         }
         Command::Server(ServerCmd::Install) => {
             server_cmd::install(cli.quiet).await?;

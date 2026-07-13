@@ -131,6 +131,17 @@ pub(crate) enum Command {
         since: Option<String>,
     },
 
+    /// Stream a deployment's build log (live during a build, or after the fact).
+    BuildLogs {
+        service: String,
+
+        #[arg(short, long)]
+        follow: bool,
+        /// A specific deployment id; defaults to the latest deployment.
+        #[arg(long)]
+        deployment: Option<String>,
+    },
+
     #[command(subcommand)]
     Config(ConfigCmd),
 
