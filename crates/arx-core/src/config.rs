@@ -39,6 +39,10 @@ pub struct PathsConfig {
     pub db_path: PathBuf,
     pub repos_dir: PathBuf,
     pub backups_dir: PathBuf,
+    /// Where per-deployment build logs are stored (`<id>.log`). Defaulted so a
+    /// pre-existing `[paths]` config that predates build logs still loads.
+    #[serde(default = "default_build_logs_dir")]
+    pub build_logs_dir: PathBuf,
     pub traefik_dir: PathBuf,
 
     pub master_key_path: PathBuf,
@@ -51,11 +55,16 @@ impl Default for PathsConfig {
             db_path: data.join("arx.db"),
             repos_dir: data.join("repos"),
             backups_dir: data.join("backups"),
+            build_logs_dir: data.join("build-logs"),
             traefik_dir: data.join("traefik"),
             master_key_path: data.join("master.key"),
             data_dir: data,
         }
     }
+}
+
+fn default_build_logs_dir() -> PathBuf {
+    PathBuf::from("/var/lib/arx/build-logs")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
