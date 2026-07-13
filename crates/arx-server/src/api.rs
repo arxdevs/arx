@@ -104,6 +104,10 @@ pub fn router(state: AppState) -> Router {
             get(stream_logs),
         )
         .route(
+            "/v1/workspaces/:ws/projects/:proj/services/:svc/build-logs",
+            get(stream_build_logs),
+        )
+        .route(
             "/v1/workspaces/:ws/projects/:proj/services/:svc/exec",
             get(exec_ws),
         )
@@ -1589,6 +1593,138 @@ async fn stream_logs(
         };
         Ok::<_, std::convert::Infallible>(Event::default().data(body))
     });
+
+    Ok(Sse::new(sse_stream)
+        .keep_alive(axum::response::sse::KeepAlive::default())
+        .into_response())
+}
+
+#[derive(Deserialize)]
+struct BuildLogQuery {
+    #[serde(default)]
+    env: Option<String>,
+    #[serde(default)]
+    follow: bool,
+    /// Specific deployment to view; defaults to the latest for the service/env,
+    /// so an in-flight build is shown by default and past builds are addressable.
+    #[serde(default)]
+    deployment: Option<String>,
+}
+
+/// Stream a deployment's build log. Peer of [`stream_logs`], but the source is
+/// arx's own per-deployment store (Docker does not retain build output): the
+/// stored file is replayed, then — if the build is still in flight — live lines
+/// are appended from the broadcast hub until the terminal event. Same
+/// `{"stream","line","ts"}` / `{"error"}` SSE payload the CLI already parses.
+async fn stream_build_logs(
+    Auth(user): Auth,
+    State(app): State<AppState>,
+    Path((ws, proj, svc)): Path<(String, String, String)>,
+    axum::extract::Query(q): axum::extract::Query<BuildLogQuery>,
+) -> ApiResult<axum::response::Response> {
+    use crate::build_logs::BuildLogEvent;
+    use axum::response::sse::{Event, Sse};
+    use futures::StreamExt;
+    use tokio::sync::broadcast::error::RecvError;
+
+    // Same authorization as runtime logs.
+    let (_, _) = require_workspace_role(&app, user.user_id, &ws).await?;
+    let (sid, eid, _) = resolve_se(&app, &ws, &proj, &svc, q.env.as_deref()).await?;
+
+    // Resolve the target deployment: explicit id (must belong to this
+    // service/env) or the latest for the service/env.
+    let dep_id = match &q.deployment {
+        Some(raw) => {
+            let uuid = uuid::Uuid::parse_str(raw)
+                .map_err(|_| ApiError::bad_request("bad deployment id"))?;
+            let id = arx_core::ids::DeploymentId::from_uuid(uuid);
+            let dep = deployments::get(&app.db, id).await?;
+            if dep.service_id != sid || dep.environment_id != eid {
+                return Err(ApiError::not_found());
+            }
+            id
+        }
+        None => {
+            use sqlx::Row;
+            let row = sqlx::query(
+                "SELECT id FROM deployments
+                 WHERE service_id = ? AND environment_id = ?
+                 ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(sid.as_uuid().to_string())
+            .bind(eid.as_uuid().to_string())
+            .fetch_optional(&app.db)
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?
+            .ok_or_else(ApiError::not_found)?;
+            let id: String = row
+                .try_get("id")
+                .map_err(|e| ApiError::internal(e.to_string()))?;
+            let uuid = uuid::Uuid::parse_str(&id).map_err(|e| ApiError::internal(e.to_string()))?;
+            arx_core::ids::DeploymentId::from_uuid(uuid)
+        }
+    };
+
+    fn line_event(line: &str) -> Event {
+        Event::default().data(
+            serde_json::json!({
+                "stream": "Build",
+                "line": line,
+                "ts": chrono::Utc::now().to_rfc3339(),
+            })
+            .to_string(),
+        )
+    }
+
+    // Subscribe *before* reading the file when following, so no line emitted
+    // between the read and the subscribe is lost. Without an in-flight session
+    // the stored file is already the complete log.
+    let live = if q.follow {
+        app.build_log_hub.subscribe(dep_id)
+    } else {
+        None
+    };
+    let stored = app.build_log_store.read(dep_id).await.unwrap_or_default();
+
+    // Replay whatever is already on disk.
+    let replay = futures::stream::iter(
+        stored
+            .lines()
+            .map(|l| Ok::<_, std::convert::Infallible>(line_event(l)))
+            .collect::<Vec<_>>(),
+    );
+
+    // Then tail the live broadcast, if the build is still running. `unfold`
+    // drives the receiver; yielding `None` state ends the stream. Each poll
+    // handles exactly one broadcast event.
+    let live_stream = futures::stream::unfold(live, |state| async move {
+        let mut rx = state?;
+        match rx.recv().await {
+            Ok(BuildLogEvent::Line(line)) => Some((Ok(line_event(&line)), Some(rx))),
+            // Terminal: emit an outcome event, then end the stream next poll.
+            Ok(BuildLogEvent::End { success }) => {
+                let ev = Event::default().data(
+                    serde_json::json!({
+                        "stream": "Build",
+                        "line": if success { "build succeeded" } else { "build failed" },
+                        "ts": chrono::Utc::now().to_rfc3339(),
+                    })
+                    .to_string(),
+                );
+                Some((Ok(ev), None))
+            }
+            Err(RecvError::Closed) => None,
+            // Slow consumer fell behind the ring buffer: tell the client to
+            // re-fetch rather than silently dropping lines, then keep tailing.
+            Err(RecvError::Lagged(_)) => {
+                let ev = Event::default()
+                    .data(serde_json::json!({"error":"log stream lagged; re-fetch"}).to_string());
+                Some((Ok(ev), Some(rx)))
+            }
+        }
+    });
+
+    let sse_stream = replay.chain(live_stream);
 
     Ok(Sse::new(sse_stream)
         .keep_alive(axum::response::sse::KeepAlive::default())
