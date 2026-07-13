@@ -12,7 +12,22 @@ arx logs web --tail 200       # last N lines
 arx logs web --since 1h       # newer than a relative duration: 1h, 30m, 10s, 2d
 ```
 
-Logs are the first place to look when a deploy is `failed` or a service misbehaves.
+Logs are the first place to look when a service misbehaves at runtime. Runtime
+logs come straight from Docker (`docker logs`), so arx stores nothing for them.
+
+## Build logs
+
+Build logs are the `docker build` output for a deployment. Unlike runtime logs,
+Docker does not retain them, so arx captures and stores them per deployment —
+including past and failed builds.
+
+```bash
+arx build-logs web                       # build log of the latest deployment
+arx build-logs web -f                    # follow a build live as it runs
+arx build-logs web --deployment <id>     # a specific past deployment (see `arx deployments`)
+```
+
+Build logs are the first place to look when a deploy is `failed`.
 
 ## Exec into the container
 

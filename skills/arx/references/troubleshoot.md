@@ -12,7 +12,8 @@ arx logs web --tail 200        # the build/runtime error is almost always here
 
 Common causes:
 
-- **Build failure** — bad build command or missing dependency. Inspect the logs;
+- **Build failure** — bad build command or missing dependency. Inspect the build
+  log with `arx build-logs <service>` (add `--deployment <id>` for a past build);
   override with `arx service config set web --build-cmd "..."` and redeploy.
 - **Healthcheck never passed** — the container started but didn't become healthy
   (wrong start command, app crashed, wrong port). Check logs for a crash;
