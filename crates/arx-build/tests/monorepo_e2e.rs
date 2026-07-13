@@ -157,6 +157,7 @@ fn monorepo_real_pnpm_build_resolves_dependency() {
         build_command: None,
         start_command: Some("node /app/apps/web/index.js".to_string()),
         build_env: vec![],
+        log_sink: None,
     };
 
     let rt = tokio::runtime::Builder::new_current_thread()

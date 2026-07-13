@@ -2,12 +2,25 @@ use crate::monorepo::{self, MonorepoLayout, WorkspaceContext};
 use crate::stack::{self, CommandOverrides, StackBuilder};
 use crate::validate::BuildError;
 use arx_core::{Error, Result};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tokio::io::AsyncWriteExt;
+use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc::UnboundedSender;
 
 use sha2::{Digest, Sha256};
+
+/// Line-oriented build-log sink. Each captured `docker build` stdout/stderr line
+/// (newline-stripped) is sent here. arx-build never blocks on or fails because of
+/// it: the channel is unbounded and send failures (receiver dropped) are ignored.
+pub type BuildLogSink = UnboundedSender<String>;
+
+/// How many trailing build-log lines are folded into the returned error on a
+/// non-zero exit, so a failed build always surfaces *something* even when no
+/// sink is attached. Bounded so a runaway build can't produce a huge error.
+const ERROR_TAIL_LINES: usize = 50;
 
 pub struct BuildInput {
     pub source_dir: PathBuf,
@@ -20,6 +33,9 @@ pub struct BuildInput {
     /// Injected as a single BuildKit secret (`arx_env`) — never as `--build-arg`
     /// — so values never leak into image history/layers.
     pub build_env: Vec<(String, String)>,
+    /// Optional line-oriented build-log sink. `None` drops the output (matching
+    /// the daemon's previous inherited-stdio behaviour semantically).
+    pub log_sink: Option<BuildLogSink>,
 }
 
 pub struct BuildOutput {
@@ -66,7 +82,14 @@ pub async fn build(input: &BuildInput) -> Result<BuildOutput> {
     };
 
     if let Some(dockerfile) = explicit_dockerfile {
-        docker_build_file(&context, &dockerfile, &input.image_tag, &prepared).await?;
+        docker_build_file(
+            &context,
+            &dockerfile,
+            &input.image_tag,
+            &prepared,
+            input.log_sink.as_ref(),
+        )
+        .await?;
         return Ok(BuildOutput {
             image_ref: input.image_tag.clone(),
             used: BuilderKind::Dockerfile,
@@ -102,7 +125,14 @@ pub async fn build(input: &BuildInput) -> Result<BuildOutput> {
         );
     }
 
-    docker_build_stdin(&context, &dockerfile_text, &input.image_tag, &prepared).await?;
+    docker_build_stdin(
+        &context,
+        &dockerfile_text,
+        &input.image_tag,
+        &prepared,
+        input.log_sink.as_ref(),
+    )
+    .await?;
 
     Ok(BuildOutput {
         image_ref: input.image_tag.clone(),
@@ -199,6 +229,12 @@ fn prepare_build_env(vars: &[(String, String)]) -> PreparedEnv {
 /// that AGENTS.md forbids reintroducing.
 fn apply_build_env(cmd: &mut Command, env: &PreparedEnv) {
     cmd.env("DOCKER_BUILDKIT", "1");
+    // Now that we pipe and capture stdout/stderr, force line-oriented plain
+    // progress. BuildKit's default `auto` renderer emits TTY redraw/ANSI codes
+    // against a pipe in some versions, which would corrupt captured log lines.
+    // `plain` prints newline-terminated `#<step> ...` lines with no cursor
+    // control, and still redacts `--mount=type=secret` values.
+    cmd.arg("--progress=plain");
     if let Some(h) = &env.hash {
         cmd.arg("--build-arg").arg(format!("ARX_ENV_HASH={h}"));
     }
@@ -213,6 +249,7 @@ async fn docker_build_file(
     dockerfile: &Path,
     tag: &str,
     env: &PreparedEnv,
+    log_sink: Option<&BuildLogSink>,
 ) -> Result<()> {
     let mut cmd = Command::new("docker");
     cmd.arg("build").arg("-t").arg(tag);
@@ -220,18 +257,15 @@ async fn docker_build_file(
     cmd.arg("-f")
         .arg(dockerfile)
         .arg(context)
-        .stdin(Stdio::null());
-    let status = cmd
-        .status()
-        .await
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
         .map_err(|e| Error::Internal(format!("docker build spawn: {e}")))?;
-    if !status.success() {
-        return Err(Error::Internal(format!(
-            "docker build failed (exit {})",
-            status.code().unwrap_or(-1)
-        )));
-    }
-    Ok(())
+
+    let tail = pump_output(&mut child, log_sink).await;
+    finish(child, tail).await
 }
 
 /// Avoids writing a Dockerfile into the user's repo by piping through `-f -`.
@@ -240,33 +274,114 @@ async fn docker_build_stdin(
     dockerfile: &str,
     tag: &str,
     env: &PreparedEnv,
+    log_sink: Option<&BuildLogSink>,
 ) -> Result<()> {
     let mut cmd = Command::new("docker");
     cmd.arg("build").arg("-t").arg(tag);
     apply_build_env(&mut cmd, env);
-    cmd.arg("-f").arg("-").arg(context).stdin(Stdio::piped());
+    cmd.arg("-f")
+        .arg("-")
+        .arg(context)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd
         .spawn()
         .map_err(|e| Error::Internal(format!("docker build spawn: {e}")))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(dockerfile.as_bytes())
-            .await
-            .map_err(|e| Error::Internal(format!("write Dockerfile to docker build stdin: {e}")))?;
-        stdin
-            .shutdown()
-            .await
-            .map_err(|e| Error::Internal(format!("close docker build stdin: {e}")))?;
+    // Write the Dockerfile to stdin *concurrently* with draining stdout/stderr:
+    // a large Dockerfile write would otherwise block against undrained pipes.
+    let stdin = child.stdin.take();
+    let dockerfile = dockerfile.to_string();
+    let write_stdin = async move {
+        if let Some(mut stdin) = stdin {
+            let _ = stdin.write_all(dockerfile.as_bytes()).await;
+            let _ = stdin.shutdown().await;
+        }
+    };
+
+    let (_, tail) = tokio::join!(write_stdin, pump_output(&mut child, log_sink));
+    finish(child, tail).await
+}
+
+/// Drain stdout+stderr concurrently, forwarding every line to the sink and
+/// keeping a bounded tail for the error path. Must run to EOF *before* awaiting
+/// the child's exit, or a full pipe buffer would deadlock `docker build`.
+async fn pump_output(
+    child: &mut tokio::process::Child,
+    log_sink: Option<&BuildLogSink>,
+) -> VecDeque<String> {
+    let tail = Arc::new(Mutex::new(VecDeque::<String>::with_capacity(
+        ERROR_TAIL_LINES,
+    )));
+
+    let mut out = child.stdout.take().map(|s| BufReader::new(s).lines());
+    let mut err = child.stderr.take().map(|s| BufReader::new(s).lines());
+
+    let emit = |line: String| {
+        {
+            let mut t = tail.lock().unwrap_or_else(|e| e.into_inner());
+            if t.len() == ERROR_TAIL_LINES {
+                t.pop_front();
+            }
+            t.push_back(line.clone());
+        }
+        if let Some(tx) = log_sink {
+            let _ = tx.send(line);
+        }
+    };
+
+    loop {
+        if out.is_none() && err.is_none() {
+            break;
+        }
+        tokio::select! {
+            r = next_line(&mut out) => match r {
+                Some(line) => emit(line),
+                None => out = None,
+            },
+            r = next_line(&mut err) => match r {
+                Some(line) => emit(line),
+                None => err = None,
+            },
+        }
     }
 
+    Arc::try_unwrap(tail)
+        .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()))
+        .unwrap_or_default()
+}
+
+/// Read the next line from an optional line stream. A `None` stream (closed
+/// pipe) stays `Pending` forever so `select!` doesn't spin on a dead branch.
+async fn next_line<R: tokio::io::AsyncBufRead + Unpin>(
+    lines: &mut Option<tokio::io::Lines<R>>,
+) -> Option<String> {
+    match lines {
+        Some(l) => l.next_line().await.ok().flatten(),
+        None => std::future::pending().await,
+    }
+}
+
+/// Await the finished child and map a non-zero exit into an error that carries
+/// the captured tail lines, so failures are legible even without a log sink.
+async fn finish(mut child: tokio::process::Child, tail: VecDeque<String>) -> Result<()> {
     let status = child
         .wait()
         .await
         .map_err(|e| Error::Internal(format!("docker build wait: {e}")))?;
     if !status.success() {
+        let suffix = if tail.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n--- last {} build log lines ---\n{}",
+                tail.len(),
+                tail.iter().cloned().collect::<Vec<_>>().join("\n")
+            )
+        };
         return Err(Error::Internal(format!(
-            "docker build failed (exit {})",
+            "docker build failed (exit {}){suffix}",
             status.code().unwrap_or(-1)
         )));
     }
@@ -279,6 +394,55 @@ mod tests {
     use crate::stack::CommandOverrides;
     use std::fs;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn pump_captures_interleaved_stdout_stderr_and_error_tail() {
+        // A fake "build" that writes to both pipes and exits non-zero.
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("echo out1; echo err1 >&2; echo out2; exit 3")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sh");
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let tail = pump_output(&mut child, Some(&tx)).await;
+        drop(tx);
+
+        // Every line reached the sink.
+        let mut sunk = Vec::new();
+        while let Ok(line) = rx.try_recv() {
+            sunk.push(line);
+        }
+        sunk.sort();
+        assert_eq!(sunk, vec!["err1", "out1", "out2"]);
+
+        // The bounded tail carries the same lines for the error path.
+        assert_eq!(tail.len(), 3);
+
+        // finish() folds the tail into the error on a non-zero exit.
+        let err = finish(child, tail).await.expect_err("non-zero exit");
+        let msg = err.to_string();
+        assert!(msg.contains("docker build failed (exit 3)"), "{msg}");
+        assert!(msg.contains("out2"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn finish_ok_on_zero_exit_and_no_sink() {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("echo hi; exit 0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sh");
+        // No sink attached: draining must still succeed without deadlock.
+        let tail = pump_output(&mut child, None).await;
+        assert!(finish(child, tail).await.is_ok());
+    }
 
     #[test]
     fn prepare_build_env_escapes_skips_and_hashes() {
