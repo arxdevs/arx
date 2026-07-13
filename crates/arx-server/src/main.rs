@@ -2,6 +2,7 @@ mod api;
 mod audit_pruner;
 mod auth;
 mod backups;
+mod build_logs;
 mod cascade;
 mod cert_poll;
 mod csrf;
@@ -76,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "arx-server starting");
 
     std::fs::create_dir_all(&cfg.paths.data_dir)?;
+    std::fs::create_dir_all(&cfg.paths.build_logs_dir)?;
 
     let db = arx_db::connect(&cfg.paths.db_path)
         .await
@@ -114,6 +116,8 @@ async fn main() -> anyhow::Result<()> {
         in_flight_deploys: Arc::new(AtomicUsize::new(0)),
         http,
         oauth_states: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        build_log_store: build_logs::BuildLogStore::new(cfg.paths.build_logs_dir.clone()),
+        build_log_hub: build_logs::BuildLogHub::new(),
     };
 
     cleanup_interrupted_deployments(&state).await;

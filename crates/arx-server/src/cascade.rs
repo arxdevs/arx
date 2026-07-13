@@ -112,6 +112,22 @@ pub async fn delete_service(
         }
     }
 
+    // Build logs live on disk keyed by deployment id, so the DB cascade won't
+    // reach them — remove them explicitly before the rows are gone.
+    if let Ok(dep_rows) = sqlx::query("SELECT id FROM deployments WHERE service_id = ?")
+        .bind(service.id.as_uuid().to_string())
+        .fetch_all(&app.db)
+        .await
+    {
+        let ids = dep_rows.into_iter().filter_map(|r| {
+            r.try_get::<String, _>("id")
+                .ok()
+                .and_then(|s| uuid::Uuid::parse_str(&s).ok())
+                .map(arx_core::ids::DeploymentId::from_uuid)
+        });
+        crate::build_logs::remove_many(&app.config.paths.build_logs_dir, ids).await;
+    }
+
     if matches!(service.source, ServiceSource::GitSource { .. }) {
         let repo_root = &app.config.paths.repos_dir;
         if let Ok(read) = std::fs::read_dir(repo_root) {

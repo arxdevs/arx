@@ -26,6 +26,7 @@ const TABS = [
   "overview",
   "deployments",
   "logs",
+  "build logs",
   "variables",
   "domains",
   "config",
@@ -93,6 +94,9 @@ export function ServicePage() {
             <DeploymentsList ws={ws} proj={proj} svc={svc} />
           )}
           {tab === "logs" && <LogViewer ws={ws} proj={proj} svc={svc} />}
+          {tab === "build logs" && (
+            <LogViewer ws={ws} proj={proj} svc={svc} kind="build" />
+          )}
           {tab === "variables" && (
             <VariablesTab ws={ws} proj={proj} svc={svc} />
           )}

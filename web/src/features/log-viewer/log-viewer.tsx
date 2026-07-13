@@ -6,6 +6,8 @@ interface Props {
   proj: string;
   svc: string;
   env?: string;
+  /** Which stream to view: runtime container logs (default) or build logs. */
+  kind?: "runtime" | "build";
 }
 
 interface LogLine {
@@ -14,7 +16,7 @@ interface LogLine {
   error?: string;
 }
 
-export function LogViewer({ ws, proj, svc, env }: Props) {
+export function LogViewer({ ws, proj, svc, env, kind = "runtime" }: Props) {
   const [lines, setLines] = useState<string[]>([]);
   const [status, setStatus] = useState<"connecting" | "open" | "closed">(
     "connecting",
@@ -25,9 +27,11 @@ export function LogViewer({ ws, proj, svc, env }: Props) {
     setLines([]);
     setStatus("connecting");
 
-    const params = new URLSearchParams({ follow: "true", tail: "200" });
+    const params = new URLSearchParams({ follow: "true" });
+    if (kind === "runtime") params.set("tail", "200");
     if (env) params.set("env", env);
-    const url = `/v1/workspaces/${ws}/projects/${proj}/services/${svc}/logs?${params}`;
+    const path = kind === "build" ? "build-logs" : "logs";
+    const url = `/v1/workspaces/${ws}/projects/${proj}/services/${svc}/${path}?${params}`;
     const source = new EventSource(url, { withCredentials: true });
 
     source.onopen = () => setStatus("open");
@@ -45,7 +49,7 @@ export function LogViewer({ ws, proj, svc, env }: Props) {
     source.onerror = () => setStatus("closed");
 
     return () => source.close();
-  }, [ws, proj, svc, env]);
+  }, [ws, proj, svc, env, kind]);
 
   useEffect(() => {
     const box = boxRef.current;

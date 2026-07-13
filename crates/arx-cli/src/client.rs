@@ -71,6 +71,54 @@ impl Client {
         };
         Err(err.into())
     }
+
+    /// Consume a `text/event-stream` at `url`, printing each event's `line`
+    /// field to stdout (falling back to the raw `data:` payload on parse
+    /// failure). Shared by `logs` and `build-logs`.
+    pub(crate) async fn stream_sse_lines(&self, url: &str) -> Result<()> {
+        use futures::StreamExt;
+        let mut req = self.http.get(url).header("accept", "text/event-stream");
+        if let Some(t) = &self.token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| CliError::Network(e.to_string()))?;
+        if !resp.status().is_success() {
+            anyhow::bail!(CliError::Server(format!(
+                "status {}: {}",
+                resp.status(),
+                resp.text().await.unwrap_or_default()
+            )));
+        }
+        let mut stream = resp.bytes_stream();
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| CliError::Network(e.to_string()))?;
+            buf.extend_from_slice(&chunk);
+            while let Some(pos) = buf.windows(2).position(|w| w == b"\n\n") {
+                let event_bytes: Vec<u8> = buf.drain(..pos + 2).collect();
+                let text = String::from_utf8_lossy(&event_bytes);
+                for line in text.lines() {
+                    if let Some(data) = line
+                        .strip_prefix("data: ")
+                        .or_else(|| line.strip_prefix("data:"))
+                    {
+                        match serde_json::from_str::<Value>(data.trim()) {
+                            Ok(v) => {
+                                if let Some(line_text) = v.get("line").and_then(|x| x.as_str()) {
+                                    println!("{line_text}");
+                                }
+                            }
+                            Err(_) => println!("{data}"),
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn print_value(v: &Value, _json: bool) {

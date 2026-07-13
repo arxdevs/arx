@@ -298,6 +298,48 @@ async fn deploy_git_source(
         &config_hash[..6]
     );
 
+    // Ensure a deployment row exists *before* the build so build logs always
+    // attach to a deployment id, on both the manual path (row pre-created and
+    // passed as existing_dep_id) and the webhook path (existing_dep_id = None,
+    // no row yet). We mark it `building` — the status arx has always modelled
+    // but never written — and forward it to deploy_docker_image, which now
+    // always receives Some(id) from this git path.
+    let dep_id = match existing_dep_id {
+        Some(id) => {
+            deployments::update_status(&app.db, id, DeploymentStatus::Building, None, None, false)
+                .await?;
+            id
+        }
+        None => {
+            let id = deployments::create_pending(
+                &app.db,
+                service.id,
+                environment.id,
+                Some(&image_tag),
+                Some(&sha),
+                &serde_json::Value::Object(Default::default()),
+            )
+            .await?;
+            deployments::update_status(&app.db, id, DeploymentStatus::Building, None, None, false)
+                .await?;
+            id
+        }
+    };
+
+    // Capture the build's output: an unbounded mpsc feeds a task that tees every
+    // line to the file-backed store and the live broadcast hub.
+    let mut writer =
+        crate::build_logs::BuildLogWriter::begin(&app.build_log_store, &app.build_log_hub, dep_id)
+            .await
+            .map_err(|e| ApiError::internal(format!("open build log: {e}")))?;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let pump = tokio::spawn(async move {
+        while let Some(line) = rx.recv().await {
+            writer.append(&line).await;
+        }
+        writer
+    });
+
     let out = arx_build::build(&arx_build::BuildInput {
         source_dir: path,
         image_tag: image_tag.clone(),
@@ -306,11 +348,40 @@ async fn deploy_git_source(
         build_command: service.build_command.clone(),
         start_command: service.start_command.clone(),
         build_env,
+        log_sink: Some(tx),
     })
-    .await
-    .map_err(|e| match e {
-        arx_core::Error::InvalidInput(m) => ApiError::bad_request(m),
-        other => ApiError::internal(format!("build: {other}")),
+    .await;
+
+    // Drop of the sender (moved into BuildInput and consumed) ends the pump; join
+    // it to recover the writer and emit the terminal build-log event.
+    let succeeded = out.is_ok();
+    if let Ok(writer) = pump.await {
+        writer.finish(succeeded).await;
+    }
+
+    let out = out.map_err(|e| {
+        let msg = match &e {
+            arx_core::Error::InvalidInput(m) => m.clone(),
+            other => format!("build: {other}"),
+        };
+        // The build row is already `building`; record the failure on it so the
+        // deployment listing reflects the outcome, then surface the error.
+        let db = app.db.clone();
+        tokio::spawn(async move {
+            let _ = deployments::update_status(
+                &db,
+                dep_id,
+                DeploymentStatus::Failed,
+                None,
+                Some(&msg),
+                true,
+            )
+            .await;
+        });
+        match e {
+            arx_core::Error::InvalidInput(m) => ApiError::bad_request(m),
+            other => ApiError::internal(format!("build: {other}")),
+        }
     })?;
 
     tracing::info!(image = %out.image_ref, builder = ?out.used, "git source built");
@@ -322,7 +393,7 @@ async fn deploy_git_source(
             project,
             service,
             environment,
-            existing_dep_id,
+            existing_dep_id: Some(dep_id),
             image: out.image_ref,
             extra_env: vec![("ARX_COMMIT_SHA".into(), sha.clone())],
             extra_mounts: vec![],

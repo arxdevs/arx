@@ -31,6 +31,10 @@ pub struct AppState {
     pub in_flight_deploys: Arc<AtomicUsize>,
     pub http: reqwest::Client,
     pub oauth_states: OAuthStateMap,
+    /// File-backed store for per-deployment build logs.
+    pub build_log_store: crate::build_logs::BuildLogStore,
+    /// Live broadcast fan-out for in-flight build logs (first pubsub in AppState).
+    pub build_log_hub: crate::build_logs::BuildLogHub,
 }
 
 impl AppState {

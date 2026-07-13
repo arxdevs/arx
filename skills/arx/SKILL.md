@@ -65,7 +65,7 @@ workspace            tenant boundary               (-w / ARX_WORKSPACE)
 | --- | --- | --- |
 | Stand up an arx server, or log in a client | `arx setup`, `arx login` | `references/setup.md` |
 | Create project/service and deploy a repo, image, or DB; verify; roll back | `arx project/service create`, `arx deploy`, `arx deployments`, `arx rollback` | `references/deploy.md` |
-| Operate a running service: logs, exec, restart, env vars, domains, build/start cmds | `arx logs`, `arx exec`, `arx restart`, `arx var`, `arx domain`, `arx service config` | `references/operate.md` |
+| Operate a running service: logs, build logs, exec, restart, env vars, domains, build/start cmds | `arx logs`, `arx build-logs`, `arx exec`, `arx restart`, `arx var`, `arx domain`, `arx service config` | `references/operate.md` |
 | Back up / restore a database, schedule backups | `arx backup` | `references/backups.md` |
 | Send event notifications to external URLs | `arx webhook` | `references/webhooks.md` |
 | A deploy failed or a service is unreachable | — | `references/troubleshoot.md` |
